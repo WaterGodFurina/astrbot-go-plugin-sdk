@@ -1,0 +1,105 @@
+// AstrBot Go plugin service contract.
+//
+// This is the RPC boundary between the AstrBot host process and a plugin
+// running as a subprocess (go-plugin, gRPC flavor). Plugin authors do NOT
+// touch this file directly; they implement the `sdk.Plugin` struct and call
+// `sdk.Serve(&plugin)`. The generated code under ../gen is produced with:
+//
+//	buf generate
+//
+// The heavy, platform-specific event/component payloads (message chains,
+// metadata) cross the wire as `bytes` of JSON to keep the proto surface small
+// and forward-compatible; the SDK (event.go) provides typed helpers.
+syntax = "proto3";
+
+package astrbot.sdk.v1;
+
+option go_package = "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1";
+
+// PluginService is implemented by every plugin subprocess.
+service PluginService {
+  // Register returns plugin metadata and its handler descriptors.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  // HandleCommand invokes a registered command handler.
+  rpc HandleCommand(HandleCommandRequest) returns (HandleCommandResponse);
+  // HandleFilter invokes a registered event filter.
+  rpc HandleFilter(HandleFilterRequest) returns (HandleFilterResponse);
+  // HandleHook invokes a registered lifecycle/pipeline hook.
+  rpc HandleHook(HandleHookRequest) returns (Empty);
+  // HealthCheck is used for keep-alive/readiness probing.
+  rpc HealthCheck(Empty) returns (HealthResponse);
+  // Cleanup is called when the host unloads the plugin.
+  rpc Cleanup(Empty) returns (Empty);
+}
+
+message Empty {}
+
+// CommandDesc describes a command the plugin accepts.
+message CommandDesc {
+  string name = 1;
+  repeated string aliases = 2;
+  string description = 3;
+  string usage = 4;
+  string permission = 5; // "everyone" | "admin"
+}
+
+// FilterDesc describes an event filter the plugin registers.
+message FilterDesc {
+  string name = 1;
+}
+
+// HookDesc describes a lifecycle/pipeline hook the plugin registers.
+message HookDesc {
+  string name = 1;
+  string event = 2; // e.g. "startup", "on_message", "on_llm_request"
+}
+
+message RegisterRequest {}
+
+message RegisterResponse {
+  string name = 1;
+  string version = 2;
+  string description = 3;
+  string author = 4;
+  repeated CommandDesc commands = 5;
+  repeated FilterDesc filters = 6;
+  repeated HookDesc hooks = 7;
+  // JSON of the plugin's config schema (map[string]any).
+  bytes config_schema_json = 8;
+}
+
+message HandleCommandRequest {
+  string name = 1;
+  repeated string args = 2;
+  // JSON of sdk.Event.
+  bytes event_json = 3;
+}
+
+message HandleCommandResponse {
+  string text = 1;
+  // JSON of []sdk.Component (optional richer result chain).
+  bytes chain_json = 2;
+  bool stop = 3;
+}
+
+message HandleFilterRequest {
+  string name = 1;
+  // JSON of sdk.Event.
+  bytes event_json = 2;
+}
+
+message HandleFilterResponse {
+  bool allow = 1;
+}
+
+message HandleHookRequest {
+  string name = 1;
+  // JSON of sdk.Event.
+  bytes event_json = 2;
+}
+
+message HealthResponse {
+  bool ok = 1;
+  double load = 2;
+  string version = 3;
+}
