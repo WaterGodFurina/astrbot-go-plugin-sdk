@@ -79,6 +79,7 @@ type Event struct {
 	MessageStr string         `json:"message_str"`
 	PlainText  string         `json:"plain_text"`
 	RawMessage string         `json:"raw_message,omitempty"`
+	MessageID  string         `json:"message_id,omitempty"`
 	Timestamp  int64          `json:"timestamp"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
 	Chain      []Component    `json:"chain,omitempty"`

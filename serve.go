@@ -3,6 +3,7 @@ package sdk
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 
 	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
@@ -25,9 +26,24 @@ var PluginMap = map[string]plugin.Plugin{
 	"plugin_service": &PluginServiceGRPCPlugin{},
 }
 
-// Serve runs the plugin's main loop: it registers with go-plugin and blocks
-// until the host terminates the process. Call this from main().
+// Serve runs the plugin's main loop: it runs OnLoad, merges any handlers
+// registered via RegisterCommand/RegisterFilter/RegisterHook, then registers
+// with go-plugin and blocks until the host terminates the process. Call this
+// from main().
 func Serve(p *Plugin) {
+	if p == nil {
+		p = &Plugin{}
+	}
+	if p.OnLoad != nil {
+		if err := p.OnLoad(); err != nil {
+			fmt.Fprintf(os.Stderr, "astrbot plugin %s OnLoad failed: %v\n", p.Name, err)
+			os.Exit(1)
+		}
+	}
+	// Merge imperatively-registered handlers (from init()/OnLoad) into the
+	// declarative struct so the Register RPC reports the full handler set.
+	global.drain(p)
+
 	logger := hclog.New(&hclog.LoggerOptions{
 		Name:   "astrbot-plugin." + p.Name,
 		Level:  hclog.Info,
@@ -51,15 +67,31 @@ type PluginServiceGRPCPlugin struct {
 	Impl *Plugin
 }
 
-// GRPCServer registers the PluginService on the given gRPC server.
-func (p *PluginServiceGRPCPlugin) GRPCServer(_ *plugin.GRPCBroker, s *grpc.Server) error {
+// GRPCServer registers the PluginService on the given gRPC server. It also
+// captures the go-plugin broker so plugins can dial the host's HostService
+// (reverse calls) lazily from handlers.
+func (p *PluginServiceGRPCPlugin) GRPCServer(broker *plugin.GRPCBroker, s *grpc.Server) error {
+	// Store the broker for plugin->host reverse calls (HostService).
+	if broker != nil {
+		setBroker(broker)
+	}
 	sdkv1.RegisterPluginServiceServer(s, &serviceServer{impl: p.Impl})
 	return nil
 }
 
-// GRPCClient wraps the gRPC connection in a typed *Client for the host.
-func (p *PluginServiceGRPCPlugin) GRPCClient(_ context.Context, _ *plugin.GRPCBroker, c *grpc.ClientConn) (any, error) {
-	return NewClient(c), nil
+// GRPCClient wraps the gRPC connection in a typed *Client for the host. It
+// also serves the HostService over the broker so plugins can call back into
+// the host (CallAction / SendMessage / RecallMessage / GetConfig / SetConfig /
+// ChatLLM); the server is stopped when the client is closed.
+func (p *PluginServiceGRPCPlugin) GRPCClient(ctx context.Context, broker *plugin.GRPCBroker, c *grpc.ClientConn) (any, error) {
+	client := NewClient(c)
+	if broker != nil {
+		srv, lis, err := acceptHostService(broker, HostServiceAppID)
+		if err == nil {
+			client.setHostServiceServer(srv, lis)
+		}
+	}
+	return client, nil
 }
 
 // serviceServer implements sdkv1.PluginServiceServer, dispatching RPCs to the
@@ -100,6 +132,27 @@ func (s *serviceServer) Register(context.Context, *sdkv1.RegisterRequest) (*sdkv
 	for _, h := range s.impl.Hooks {
 		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: h.Event})
 	}
+	for _, h := range s.impl.LLMRequestHooks {
+		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: "on_llm_request"})
+	}
+	for _, h := range s.impl.ResultHooks {
+		ev := h.Event
+		if ev == "" {
+			ev = "on_decorating_result"
+		}
+		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: ev})
+	}
+	for _, t := range s.impl.Tools {
+		params, err := json.Marshal(t.ParamsSchema)
+		if err != nil {
+			params = []byte("{}")
+		}
+		resp.Tools = append(resp.Tools, &sdkv1.ToolDesc{
+			Name:        t.Name,
+			Description: t.Description,
+			ParamsJson:  params,
+		})
+	}
 	return resp, nil
 }
 
@@ -113,6 +166,19 @@ func (s *serviceServer) HandleCommand(_ context.Context, req *sdkv1.HandleComman
 		if c.Name != req.Name {
 			continue
 		}
+		resp := &sdkv1.HandleCommandResponse{}
+		if c.ChainHandler != nil {
+			chain, err := c.ChainHandler(e, req.Args)
+			if err != nil {
+				return nil, err
+			}
+			chainJSON, err := json.Marshal(chain)
+			if err != nil {
+				return nil, err
+			}
+			resp.ChainJson = chainJSON
+			return resp, nil
+		}
 		if c.Handler == nil {
 			return &sdkv1.HandleCommandResponse{}, nil
 		}
@@ -120,7 +186,8 @@ func (s *serviceServer) HandleCommand(_ context.Context, req *sdkv1.HandleComman
 		if err != nil {
 			return nil, err
 		}
-		return &sdkv1.HandleCommandResponse{Text: text}, nil
+		resp.Text = text
+		return resp, nil
 	}
 	return &sdkv1.HandleCommandResponse{}, nil
 }
@@ -143,22 +210,132 @@ func (s *serviceServer) HandleFilter(_ context.Context, req *sdkv1.HandleFilterR
 	return &sdkv1.HandleFilterResponse{Allow: true}, nil
 }
 
-// HandleHook dispatches to a hook handler by name.
-func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookRequest) (*sdkv1.Empty, error) {
+// HandleHook dispatches to a hook handler by name. Result hooks
+// (on_decorating_result / on_result_handling) receive the current result
+// chain and may return a decorated one; generic hooks just run.
+func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookRequest) (*sdkv1.HookResponse, error) {
+	resp := &sdkv1.HookResponse{Handled: false}
 	if s.impl == nil {
-		return &sdkv1.Empty{}, nil
+		return resp, nil
 	}
 	e := eventFromJSON(req.EventJson)
+
+	// Result hooks first (decorate the outgoing chain).
+	for _, h := range s.impl.ResultHooks {
+		if h.Name != req.Name {
+			continue
+		}
+		ev := h.Event
+		if ev == "" {
+			ev = "on_decorating_result"
+		}
+		if ev != "on_decorating_result" && ev != "on_result_handling" {
+			continue
+		}
+		if h.Handler == nil {
+			return resp, nil
+		}
+		var chain []Component
+		if len(req.ChainJson) > 0 {
+			_ = json.Unmarshal(req.ChainJson, &chain)
+		}
+		chain, err := h.Handler(e, chain)
+		if err != nil {
+			return nil, err
+		}
+		chainJSON, err := json.Marshal(chain)
+		if err != nil {
+			return nil, err
+		}
+		resp.ChainJson = chainJSON
+		resp.Stop = h.Stop
+		resp.Handled = true
+		return resp, nil
+	}
+
 	for _, h := range s.impl.Hooks {
 		if h.Name != req.Name {
 			continue
 		}
 		if h.Handler == nil {
-			return &sdkv1.Empty{}, nil
+			return resp, nil
 		}
-		return &sdkv1.Empty{}, h.Handler(e)
+		if err := h.Handler(e); err != nil {
+			return nil, err
+		}
+		resp.Handled = true
+		return resp, nil
 	}
-	return &sdkv1.Empty{}, nil
+	return resp, nil
+}
+
+// HandleLLMRequest invokes an on_llm_request hook, letting the plugin modify
+// the LLM system prompt before the provider call.
+func (s *serviceServer) HandleLLMRequest(_ context.Context, req *sdkv1.HandleLLMRequestRequest) (*sdkv1.HandleLLMRequestResponse, error) {
+	resp := &sdkv1.HandleLLMRequestResponse{SystemPrompt: req.SystemPrompt}
+	if s.impl == nil {
+		return resp, nil
+	}
+	e := eventFromJSON(req.EventJson)
+	for _, h := range s.impl.LLMRequestHooks {
+		if h.Name != req.Name {
+			continue
+		}
+		if h.Handler == nil {
+			return resp, nil
+		}
+		pr := &ProviderRequest{
+			SystemPrompt: req.SystemPrompt,
+			UserPrompt:   req.UserPrompt,
+			Extra:        e.Metadata,
+		}
+		pr, err := h.Handler(e, pr)
+		if err != nil {
+			return nil, err
+		}
+		if pr != nil {
+			resp.SystemPrompt = pr.SystemPrompt
+			resp.Stop = pr.Stop
+		}
+		return resp, nil
+	}
+	return resp, nil
+}
+
+// HandleTool invokes a registered LLM function tool.
+func (s *serviceServer) HandleTool(_ context.Context, req *sdkv1.HandleToolRequest) (*sdkv1.HandleToolResponse, error) {
+	resp := &sdkv1.HandleToolResponse{}
+	if s.impl == nil {
+		return resp, nil
+	}
+	e := eventFromJSON(req.EventJson)
+	args := map[string]any{}
+	if len(req.ArgsJson) > 0 {
+		if err := json.Unmarshal(req.ArgsJson, &args); err != nil {
+			resp.Text = "工具参数解析失败: " + err.Error()
+			resp.IsError = true
+			return resp, nil
+		}
+	}
+	for _, t := range s.impl.Tools {
+		if t.Name != req.Name {
+			continue
+		}
+		if t.Handler == nil {
+			return resp, nil
+		}
+		text, err := t.Handler(e, args)
+		if err != nil {
+			resp.Text = "工具 " + t.Name + " 执行失败: " + err.Error()
+			resp.IsError = true
+			return resp, nil
+		}
+		resp.Text = text
+		return resp, nil
+	}
+	resp.Text = "工具 " + req.Name + " 未找到"
+	resp.IsError = true
+	return resp, nil
 }
 
 // HealthCheck reports the plugin's liveness.

@@ -10,12 +10,22 @@
 // The heavy, platform-specific event/component payloads (message chains,
 // metadata) cross the wire as `bytes` of JSON to keep the proto surface small
 // and forward-compatible; the SDK (event.go) provides typed helpers.
+//
+// Bidirectional calls: the HOST serves HostService over the go-plugin gRPC
+// broker (fixed AppID 9000). Plugins dial it lazily via the broker to call
+// platform actions (OneBot API), send messages, or recall messages. The high
+// AppID never collides with go-plugin's auto-incrementing NextId() stream
+// (which starts low and is only used when a plugin implementation opts into
+// the broker itself).
 syntax = "proto3";
 
 package astrbot.sdk.v1;
 
 option go_package = "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1";
 
+// HostServiceAppID is the fixed broker AppID of the HostService
+// (9000). Define this constant in Go on both the SDK and host sides.
+//
 // PluginService is implemented by every plugin subprocess.
 service PluginService {
   // Register returns plugin metadata and its handler descriptors.
@@ -25,11 +35,32 @@ service PluginService {
   // HandleFilter invokes a registered event filter.
   rpc HandleFilter(HandleFilterRequest) returns (HandleFilterResponse);
   // HandleHook invokes a registered lifecycle/pipeline hook.
-  rpc HandleHook(HandleHookRequest) returns (Empty);
+  rpc HandleHook(HandleHookRequest) returns (HookResponse);
+  // HandleLLMRequest invokes an on_llm_request hook, letting the plugin
+  // inspect/modify the LLM system prompt before the provider call.
+  rpc HandleLLMRequest(HandleLLMRequestRequest) returns (HandleLLMRequestResponse);
+  // HandleTool invokes a registered LLM function tool.
+  rpc HandleTool(HandleToolRequest) returns (HandleToolResponse);
   // HealthCheck is used for keep-alive/readiness probing.
   rpc HealthCheck(Empty) returns (HealthResponse);
   // Cleanup is called when the host unloads the plugin.
   rpc Cleanup(Empty) returns (Empty);
+}
+
+// HostService is served by the HOST and dialed by plugins for reverse calls.
+service HostService {
+  // CallAction forwards a platform API call (e.g. OneBot v11 call_action).
+  rpc CallAction(CallActionRequest) returns (CallActionResponse);
+  // SendMessage sends a message chain to a session (proactive/reactive send).
+  rpc SendMessage(SendMessageRequest) returns (Empty);
+  // RecallMessage recalls an already-sent message by platform message id.
+  rpc RecallMessage(RecallMessageRequest) returns (Empty);
+  // GetConfig returns the plugin's persisted config (plugins/<name>/config.json).
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+  // SetConfig persists the plugin's config (plugins/<name>/config.json).
+  rpc SetConfig(SetConfigRequest) returns (Empty);
+  // ChatLLM calls the host's default chat LLM provider and returns the reply.
+  rpc ChatLLM(ChatLLMRequest) returns (ChatLLMResponse);
 }
 
 message Empty {}
@@ -51,7 +82,15 @@ message FilterDesc {
 // HookDesc describes a lifecycle/pipeline hook the plugin registers.
 message HookDesc {
   string name = 1;
-  string event = 2; // e.g. "startup", "on_message", "on_llm_request"
+  string event = 2; // e.g. "startup", "on_message", "on_llm_response"
+}
+
+// ToolDesc describes an LLM function tool the plugin exposes to the model.
+message ToolDesc {
+  string name = 1;
+  string description = 2;
+  // JSON object schema of the tool parameters.
+  bytes params_json = 3;
 }
 
 message RegisterRequest {}
@@ -66,6 +105,7 @@ message RegisterResponse {
   repeated HookDesc hooks = 7;
   // JSON of the plugin's config schema (map[string]any).
   bytes config_schema_json = 8;
+  repeated ToolDesc tools = 9;
 }
 
 message HandleCommandRequest {
@@ -96,10 +136,116 @@ message HandleHookRequest {
   string name = 1;
   // JSON of sdk.Event.
   bytes event_json = 2;
+  // JSON of []sdk.Component (current result chain for decoration hooks).
+  bytes chain_json = 3;
+}
+
+// HookResponse replaces Empty as the HandleHook return value so hooks can
+// decorate the outgoing reply chain and/or stop the pipeline.
+message HookResponse {
+  // JSON of []sdk.Component (result chain decoration).
+  bytes chain_json = 1;
+  bool stop = 2;
+  bool handled = 3;
+}
+
+message HandleLLMRequestRequest {
+  string name = 1;
+  // JSON of sdk.Event.
+  bytes event_json = 2;
+  // Current system prompt (may be modified by the plugin).
+  string system_prompt = 3;
+  // User prompt being sent to the model.
+  string user_prompt = 4;
+}
+
+message HandleLLMRequestResponse {
+  // (Possibly modified) system prompt.
+  string system_prompt = 1;
+  // Stop: do not call the LLM for this message.
+  bool stop = 2;
+}
+
+message HandleToolRequest {
+  string name = 1;
+  // JSON of the tool arguments (map[string]any).
+  bytes args_json = 2;
+  // JSON of sdk.Event.
+  bytes event_json = 3;
+}
+
+message HandleToolResponse {
+  // Text result fed back to the model as the tool message.
+  string text = 1;
+  bool is_error = 2;
 }
 
 message HealthResponse {
   bool ok = 1;
   double load = 2;
   string version = 3;
+}
+
+// --- HostService payloads --------------------------------------------------
+
+message CallActionRequest {
+  // Platform adapter id (e.g. "aiocqhttp"). Empty = any adapter.
+  string platform = 1;
+  // OneBot v11 API name, e.g. "get_group_member_info".
+  string api = 2;
+  // JSON object of action params.
+  bytes params_json = 3;
+}
+
+message CallActionResponse {
+  // JSON object returned by the platform (data field unwrapped).
+  bytes result_json = 1;
+}
+
+message SendMessageRequest {
+  // Platform adapter id (e.g. "aiocqhttp").
+  string platform = 1;
+  // Conversation id (group id or friend user id).
+  string session_id = 2;
+  // JSON of []sdk.Component.
+  bytes chain_json = 3;
+}
+
+message RecallMessageRequest {
+  // Platform adapter id.
+  string platform = 1;
+  // Platform message id to recall.
+  string message_id = 2;
+}
+
+message GetConfigRequest {
+  // Plugin name (the value returned by Register).
+  string plugin_name = 1;
+}
+
+message GetConfigResponse {
+  // JSON object of the plugin's persisted config.
+  bytes config_json = 1;
+}
+
+message SetConfigRequest {
+  // Plugin name (the value returned by Register).
+  string plugin_name = 1;
+  // JSON object of the full config to persist.
+  bytes config_json = 2;
+}
+
+message ChatLLMRequest {
+  // User prompt sent to the model.
+  string prompt = 1;
+  // Optional system prompt prepended to the request.
+  string system_prompt = 2;
+  // Optional session id (unified message origin) used to resolve the session's
+  // preferred provider. Empty = default provider.
+  string session_id = 3;
+}
+
+message ChatLLMResponse {
+  // The model's reply text.
+  string text = 1;
 }

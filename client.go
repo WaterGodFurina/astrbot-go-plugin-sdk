@@ -3,6 +3,7 @@ package sdk
 import (
 	"context"
 	"encoding/json"
+	"net"
 
 	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
 	"google.golang.org/grpc"
@@ -13,6 +14,12 @@ import (
 type Client struct {
 	conn *grpc.ClientConn
 	svc  sdkv1.PluginServiceClient
+
+	// hostSrv/hostLis are the HostService gRPC server the host serves on the
+	// broker for this plugin. They are stopped by Close() so reloading a plugin
+	// does not leak the listener or its serving goroutine.
+	hostSrv *grpc.Server
+	hostLis net.Listener
 }
 
 // NewClient wraps an existing gRPC connection.
@@ -28,11 +35,12 @@ func (c *Client) Register(ctx context.Context) (*sdkv1.RegisterResponse, error) 
 	return c.svc.Register(ctx, &sdkv1.RegisterRequest{})
 }
 
-// HandleCommand invokes a command handler.
-func (c *Client) HandleCommand(ctx context.Context, name string, args []string, e *Event) (string, error) {
+// HandleCommand invokes a command handler, returning its text reply plus an
+// optional rich result chain (text + images + files).
+func (c *Client) HandleCommand(ctx context.Context, name string, args []string, e *Event) (string, []Component, error) {
 	ev, err := json.Marshal(e)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	resp, err := c.svc.HandleCommand(ctx, &sdkv1.HandleCommandRequest{
 		Name:      name,
@@ -40,9 +48,15 @@ func (c *Client) HandleCommand(ctx context.Context, name string, args []string, 
 		EventJson: ev,
 	})
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return resp.Text, nil
+	var chain []Component
+	if len(resp.ChainJson) > 0 {
+		if err := json.Unmarshal(resp.ChainJson, &chain); err != nil {
+			return "", nil, err
+		}
+	}
+	return resp.Text, chain, nil
 }
 
 // HandleFilter invokes a filter handler, returning whether the event may continue.
@@ -58,14 +72,70 @@ func (c *Client) HandleFilter(ctx context.Context, name string, e *Event) (bool,
 	return resp.Allow, nil
 }
 
-// HandleHook invokes a hook handler.
-func (c *Client) HandleHook(ctx context.Context, name string, e *Event) error {
+// HandleHook invokes a hook handler. For result-decoration hooks, chain is the
+// current result chain and the (possibly decorated) chain is returned.
+func (c *Client) HandleHook(ctx context.Context, name string, e *Event, chain []Component) ([]Component, bool, error) {
 	ev, err := json.Marshal(e)
 	if err != nil {
-		return err
+		return chain, false, err
 	}
-	_, err = c.svc.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: name, EventJson: ev})
-	return err
+	var chainJSON []byte
+	if len(chain) > 0 {
+		if chainJSON, err = json.Marshal(chain); err != nil {
+			return chain, false, err
+		}
+	}
+	resp, err := c.svc.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: name, EventJson: ev, ChainJson: chainJSON})
+	if err != nil {
+		return chain, false, err
+	}
+	if len(resp.ChainJson) > 0 {
+		var out []Component
+		if err := json.Unmarshal(resp.ChainJson, &out); err == nil {
+			chain = out
+		}
+	}
+	return chain, resp.Stop, nil
+}
+
+// HandleLLMRequest invokes an on_llm_request hook, returning the (possibly
+// modified) system prompt and whether the LLM call should be stopped.
+func (c *Client) HandleLLMRequest(ctx context.Context, name string, e *Event, systemPrompt, userPrompt string) (string, bool, error) {
+	ev, err := json.Marshal(e)
+	if err != nil {
+		return systemPrompt, false, err
+	}
+	resp, err := c.svc.HandleLLMRequest(ctx, &sdkv1.HandleLLMRequestRequest{
+		Name:         name,
+		EventJson:    ev,
+		SystemPrompt: systemPrompt,
+		UserPrompt:   userPrompt,
+	})
+	if err != nil {
+		return systemPrompt, false, err
+	}
+	return resp.SystemPrompt, resp.Stop, nil
+}
+
+// HandleTool invokes a registered LLM function tool.
+func (c *Client) HandleTool(ctx context.Context, name string, args map[string]any, e *Event) (string, bool, error) {
+	ev, err := json.Marshal(e)
+	if err != nil {
+		return "", false, err
+	}
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		return "", false, err
+	}
+	resp, err := c.svc.HandleTool(ctx, &sdkv1.HandleToolRequest{
+		Name:      name,
+		ArgsJson:  argsJSON,
+		EventJson: ev,
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return resp.Text, resp.IsError, nil
 }
 
 // HealthCheck probes the plugin's liveness.
@@ -79,10 +149,30 @@ func (c *Client) Cleanup(ctx context.Context) error {
 	return err
 }
 
-// Close releases the underlying gRPC connection.
+// Close releases the underlying gRPC connection and stops the HostService
+// server this client served on the broker (if any). Call it after the plugin
+// process has been killed so reloads do not leak connections/goroutines.
 func (c *Client) Close() error {
-	if c != nil && c.conn != nil {
+	if c == nil {
+		return nil
+	}
+	if c.hostSrv != nil {
+		c.hostSrv.Stop()
+		c.hostSrv = nil
+	}
+	if c.hostLis != nil {
+		_ = c.hostLis.Close()
+		c.hostLis = nil
+	}
+	if c.conn != nil {
 		return c.conn.Close()
 	}
 	return nil
+}
+
+// setHostServiceServer records the HostService gRPC server + listener served
+// for this client so Close() can release them.
+func (c *Client) setHostServiceServer(srv *grpc.Server, lis net.Listener) {
+	c.hostSrv = srv
+	c.hostLis = lis
 }
