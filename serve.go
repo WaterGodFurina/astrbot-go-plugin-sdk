@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
 	"github.com/hashicorp/go-hclog"
@@ -85,6 +86,20 @@ func (p *PluginServiceGRPCPlugin) GRPCServer(broker *plugin.GRPCBroker, s *grpc.
 	// Store the broker for plugin->host reverse calls (HostService).
 	if broker != nil {
 		setBroker(broker)
+		// go-plugin 的 broker ConnInfo 只在宿主 accept 后约 5s 内有效（内部
+		// timeoutWait 会删除未消费的 pending）。插件若不在窗口内 Dial 9000
+		// 并保持连接，后续反向调用（GetConfig/ChatLLM/SendMessage 等）会因
+		// ConnInfo 过期而永久超时。启动后立即预连接并缓存 hostSvc。
+		go func() {
+			// 宿主 accept 9000 发生在 Dispense（插件 GRPCServer 之后），
+			// 需稍候 ConnInfo 到达；循环重试直到缓存成功。
+			for i := 0; i < 20; i++ {
+				if _, err := hostServiceClient(); err == nil {
+					return
+				}
+				time.Sleep(250 * time.Millisecond)
+			}
+		}()
 	}
 	sdkv1.RegisterPluginServiceServer(s, &serviceServer{impl: p.Impl})
 	return nil
