@@ -9,6 +9,18 @@ import (
 	"google.golang.org/grpc"
 )
 
+// maxGRPCMessageSize raises the gRPC message cap above the 4MB default so
+// large event_json/chain_json payloads (base64 images, long conversations)
+// can cross the wire between host and plugin.
+const maxGRPCMessageSize = 128 << 20 // 128MB
+
+// rpcCallOpts is attached to every host→plugin RPC to lift both send and
+// receive limits for that call.
+var rpcCallOpts = []grpc.CallOption{
+	grpc.MaxCallRecvMsgSize(maxGRPCMessageSize),
+	grpc.MaxCallSendMsgSize(maxGRPCMessageSize),
+}
+
 // Client is the host-side, typed wrapper around the plugin's gRPC service.
 // The host obtains it from go-plugin's Client() (see PluginServiceGRPCPlugin.GRPCClient).
 type Client struct {
@@ -32,7 +44,7 @@ func NewClient(conn *grpc.ClientConn) *Client {
 
 // Register fetches the plugin's metadata and handler descriptors.
 func (c *Client) Register(ctx context.Context) (*sdkv1.RegisterResponse, error) {
-	return c.svc.Register(ctx, &sdkv1.RegisterRequest{})
+	return c.svc.Register(ctx, &sdkv1.RegisterRequest{}, rpcCallOpts...)
 }
 
 // HandleCommand invokes a command handler, returning its text reply plus an
@@ -46,7 +58,7 @@ func (c *Client) HandleCommand(ctx context.Context, name string, args []string, 
 		Name:      name,
 		Args:      args,
 		EventJson: ev,
-	})
+	}, rpcCallOpts...)
 	if err != nil {
 		return "", nil, err
 	}
@@ -65,7 +77,7 @@ func (c *Client) HandleFilter(ctx context.Context, name string, e *Event) (bool,
 	if err != nil {
 		return true, err
 	}
-	resp, err := c.svc.HandleFilter(ctx, &sdkv1.HandleFilterRequest{Name: name, EventJson: ev})
+	resp, err := c.svc.HandleFilter(ctx, &sdkv1.HandleFilterRequest{Name: name, EventJson: ev}, rpcCallOpts...)
 	if err != nil {
 		return true, err
 	}
@@ -85,7 +97,7 @@ func (c *Client) HandleHook(ctx context.Context, name string, e *Event, chain []
 			return chain, false, err
 		}
 	}
-	resp, err := c.svc.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: name, EventJson: ev, ChainJson: chainJSON})
+	resp, err := c.svc.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: name, EventJson: ev, ChainJson: chainJSON}, rpcCallOpts...)
 	if err != nil {
 		return chain, false, err
 	}
@@ -110,7 +122,7 @@ func (c *Client) HandleLLMRequest(ctx context.Context, name string, e *Event, sy
 		EventJson:    ev,
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
-	})
+	}, rpcCallOpts...)
 	if err != nil {
 		return systemPrompt, false, err
 	}
@@ -131,7 +143,7 @@ func (c *Client) HandleTool(ctx context.Context, name string, args map[string]an
 		Name:      name,
 		ArgsJson:  argsJSON,
 		EventJson: ev,
-	})
+	}, rpcCallOpts...)
 	if err != nil {
 		return "", false, err
 	}
@@ -140,12 +152,12 @@ func (c *Client) HandleTool(ctx context.Context, name string, args map[string]an
 
 // HealthCheck probes the plugin's liveness.
 func (c *Client) HealthCheck(ctx context.Context) (*sdkv1.HealthResponse, error) {
-	return c.svc.HealthCheck(ctx, &sdkv1.Empty{})
+	return c.svc.HealthCheck(ctx, &sdkv1.Empty{}, rpcCallOpts...)
 }
 
 // Cleanup tells the plugin to run its unload hook.
 func (c *Client) Cleanup(ctx context.Context) error {
-	_, err := c.svc.Cleanup(ctx, &sdkv1.Empty{})
+	_, err := c.svc.Cleanup(ctx, &sdkv1.Empty{}, rpcCallOpts...)
 	return err
 }
 

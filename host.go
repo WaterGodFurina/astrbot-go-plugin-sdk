@@ -39,6 +39,11 @@ func setBroker(b *plugin.GRPCBroker) {
 	broker = b
 	// Broker may be re-provisioned (plugin serving restarts); reset cached conn.
 	hostMu.Lock()
+	// hostConn 是 *grpc.ClientConn，自带 Close()。重建 broker 时先关闭旧
+	// 连接再丢弃引用，避免底层 gRPC 连接与 goroutine 泄漏。
+	if hostConn != nil {
+		_ = hostConn.Close()
+	}
 	hostConn = nil
 	hostSvc = nil
 	hostDialDone = false
@@ -62,7 +67,11 @@ func hostServiceClient() (sdkv1.HostServiceClient, error) {
 		return nil, errNoBroker
 	}
 	conn, err := b.DialWithOptions(HostServiceAppID,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(maxGRPCMessageSize),
+			grpc.MaxCallSendMsgSize(maxGRPCMessageSize),
+		))
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +263,12 @@ func acceptHostService(b *plugin.GRPCBroker, id uint32) (*grpc.Server, net.Liste
 	if err != nil {
 		return nil, nil, err
 	}
-	srv := grpc.NewServer()
+	// 提高默认 4MB 消息上限：插件经 HostService 反向传大 chain_json
+	//（base64 图片/长对话）时不会因超限而失败。
+	srv := grpc.NewServer(
+		grpc.MaxRecvMsgSize(maxGRPCMessageSize),
+		grpc.MaxSendMsgSize(maxGRPCMessageSize),
+	)
 	sdkv1.RegisterHostServiceServer(srv, &hostServiceServer{})
 	go func() {
 		_ = srv.Serve(lis)

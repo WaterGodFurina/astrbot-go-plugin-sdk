@@ -26,6 +26,17 @@ var PluginMap = map[string]plugin.Plugin{
 	"plugin_service": &PluginServiceGRPCPlugin{},
 }
 
+// grpcServer is the plugin-side gRPC server factory. It raises the default
+// 4MB message cap so large event_json/chain_json payloads (base64 images,
+// long conversations) can be received/sent.
+func grpcServer(opts []grpc.ServerOption) *grpc.Server {
+	opts = append(opts,
+		grpc.MaxRecvMsgSize(maxGRPCMessageSize),
+		grpc.MaxSendMsgSize(maxGRPCMessageSize),
+	)
+	return plugin.DefaultGRPCServer(opts)
+}
+
 // Serve runs the plugin's main loop: it runs OnLoad, merges any handlers
 // registered via RegisterCommand/RegisterFilter/RegisterHook, then registers
 // with go-plugin and blocks until the host terminates the process. Call this
@@ -55,7 +66,7 @@ func Serve(p *Plugin) {
 	plugin.Serve(&plugin.ServeConfig{
 		HandshakeConfig: Handshake,
 		Plugins:         plugins,
-		GRPCServer:      plugin.DefaultGRPCServer,
+		GRPCServer:      grpcServer,
 		Logger:          logger,
 	})
 }
@@ -89,6 +100,19 @@ func (p *PluginServiceGRPCPlugin) GRPCClient(ctx context.Context, broker *plugin
 		srv, lis, err := acceptHostService(broker, HostServiceAppID)
 		if err == nil {
 			client.setHostServiceServer(srv, lis)
+		} else {
+			// 打 warn 日志：宿主端未能接受 HostService，插件将失去反向调用
+			// 能力（CallAction/SendMessage/GetConfig 等全部不可用）。只记录
+			// 错误本身，不含任何业务/敏感信息。
+			name := ""
+			if p.Impl != nil {
+				name = p.Impl.Name
+			}
+			hclog.New(&hclog.LoggerOptions{
+				Name:   "astrbot-plugin." + name,
+				Level:  hclog.Info,
+				Output: os.Stderr,
+			}).Warn("acceptHostService 失败：插件将无法反向调用宿主 HostService", "err", err)
 		}
 	}
 	return client, nil

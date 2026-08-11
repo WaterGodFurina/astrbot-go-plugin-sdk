@@ -1,5 +1,7 @@
 package sdk
 
+import "sync"
+
 // Package-level handler registry enabling imperative (non-struct) handler
 // registration. Handlers registered here are merged into the Plugin passed to
 // Serve() at startup, so complex plugins can register handlers from init() or
@@ -12,6 +14,10 @@ package sdk
 var global = &registry{}
 
 type registry struct {
+	// mu 保护以下切片：注册函数（RegisterXxx）与 Serve 时的 drain 读取
+	// 可能来自不同 goroutine，并发 append 会造成数据竞争。
+	mu sync.Mutex
+
 	commands        []Command
 	filters         []Filter
 	hooks           []Hook
@@ -21,30 +27,50 @@ type registry struct {
 }
 
 // RegisterCommand adds a command to the global registry (merged at Serve time).
-func RegisterCommand(cmd Command) { global.commands = append(global.commands, cmd) }
+func RegisterCommand(cmd Command) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.commands = append(global.commands, cmd)
+}
 
 // RegisterFilter adds an event filter to the global registry (merged at Serve
 // time). Returning false stops propagation of the event.
-func RegisterFilter(f Filter) { global.filters = append(global.filters, f) }
+func RegisterFilter(f Filter) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.filters = append(global.filters, f)
+}
 
 // RegisterHook adds a lifecycle/pipeline hook to the global registry (merged
 // at Serve time).
-func RegisterHook(h Hook) { global.hooks = append(global.hooks, h) }
+func RegisterHook(h Hook) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.hooks = append(global.hooks, h)
+}
 
 // RegisterTool adds an LLM function tool to the global registry (merged at
 // Serve time). The model can call it during chat; the handler runs inside the
 // plugin process.
-func RegisterTool(t Tool) { global.tools = append(global.tools, t) }
+func RegisterTool(t Tool) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.tools = append(global.tools, t)
+}
 
 // RegisterLLMRequestHook adds an on_llm_request hook that can inspect and
 // modify the LLM system prompt before the provider call.
 func RegisterLLMRequestHook(h LLMRequestHook) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
 	global.llmRequestHooks = append(global.llmRequestHooks, h)
 }
 
 // RegisterResultHook adds a result-decoration hook that can modify the outgoing
 // reply chain before it is sent.
 func RegisterResultHook(h ResultHook) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
 	global.resultHooks = append(global.resultHooks, h)
 }
 
@@ -52,6 +78,8 @@ func RegisterResultHook(h ResultHook) {
 // the registered ones. Called by Serve after OnLoad so registrations made from
 // init()/OnLoad() are all captured.
 func (r *registry) drain(p *Plugin) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	cmds := make([]Command, 0, len(r.commands)+len(p.Commands))
 	cmds = append(cmds, r.commands...)
 	cmds = append(cmds, p.Commands...)
