@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"net"
 	"sync"
+	"time"
 
 	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
 	"github.com/hashicorp/go-plugin"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 // HostServiceAppID is the go-plugin broker AppID of the host's HostService.
@@ -269,7 +272,14 @@ func acceptHostService(b *plugin.GRPCBroker, id uint32) (*grpc.Server, net.Liste
 		grpc.MaxRecvMsgSize(maxGRPCMessageSize),
 		grpc.MaxSendMsgSize(maxGRPCMessageSize),
 	)
-	sdkv1.RegisterHostServiceServer(srv, &hostServiceServer{})
+	server := &hostServiceServer{pluginID: currentHostPluginID()}
+	// 记录连接→插件 id，供 Register 后用注册名更新身份。
+	if pid := server.pluginID; pid != "" {
+		hostServersMu.Lock()
+		hostServers[pid] = server
+		hostServersMu.Unlock()
+	}
+	sdkv1.RegisterHostServiceServer(srv, server)
 	go func() {
 		_ = srv.Serve(lis)
 	}()
@@ -277,9 +287,56 @@ func acceptHostService(b *plugin.GRPCBroker, id uint32) (*grpc.Server, net.Liste
 }
 
 // hostServiceServer implements sdkv1.HostServiceServer on the host side,
-// delegating to the hooks installed via SetHostHooks.
+// delegating to the hooks installed via SetHostHooks. Each plugin connection
+// gets its own instance, bound to the plugin id the host was loading when the
+// connection was accepted, so reverse calls can be validated per-plugin.
 type hostServiceServer struct {
 	sdkv1.UnimplementedHostServiceServer
+	pluginID string
+}
+
+// hostPluginID is the id of the plugin the host is currently establishing a
+// connection for. The host sets it (SetCurrentHostPluginID) right before
+// go-plugin Dispense; acceptHostService reads it so the per-connection
+// hostServiceServer knows which plugin it serves.
+var (
+	hostPluginIDMu sync.Mutex
+	hostPluginID   string
+
+	// hostServers 记录 accept 时创建的 per-connection hostServiceServer
+	//（key=插件 manifest id），供宿主在 Register 后用注册名更新身份。
+	hostServersMu sync.Mutex
+	hostServers   = map[string]*hostServiceServer{}
+)
+
+// SetCurrentHostPluginID records the plugin id being loaded so the next
+// acceptHostService call can bind HostService reverse-call validation to it.
+// The host calls this with id before Dispense and with "" afterwards. Loads
+// of different plugins are effectively serialized (startInstance waits for the
+// handshake), so the window is safe in practice.
+func SetCurrentHostPluginID(id string) {
+	hostPluginIDMu.Lock()
+	hostPluginID = id
+	hostPluginIDMu.Unlock()
+}
+
+func currentHostPluginID() string {
+	hostPluginIDMu.Lock()
+	defer hostPluginIDMu.Unlock()
+	return hostPluginID
+}
+
+// BindHostServiceName updates the per-connection HostService server's plugin
+// identity to the plugin's registered name (Register 返回值）。插件
+// GetConfig/SetConfig 传的是注册名，而 accept 时只绑定 manifest id，二者
+// 可能不同（如 jm_cosmos vs astrbot_plugin_jm_cosmos），故宿主在 Register
+// 成功后调用本函数对齐身份，保证身份隔离校验通过。
+func BindHostServiceName(id, name string) {
+	hostServersMu.Lock()
+	defer hostServersMu.Unlock()
+	if s, ok := hostServers[id]; ok {
+		s.pluginID = name
+	}
 }
 
 func (s *hostServiceServer) CallAction(_ context.Context, req *sdkv1.CallActionRequest) (*sdkv1.CallActionResponse, error) {
@@ -326,6 +383,12 @@ func (s *hostServiceServer) RecallMessage(_ context.Context, req *sdkv1.RecallMe
 }
 
 func (s *hostServiceServer) GetConfig(_ context.Context, req *sdkv1.GetConfigRequest) (*sdkv1.GetConfigResponse, error) {
+	// 身份隔离：插件只能读取自己名字的配置，禁止探测/读取其他插件配置
+	//（插件自身以宿主用户运行、可直接读文件系统，此校验是纵深防御，
+	//  真正隔离需插件降权/容器化）。
+	if s.pluginID != "" && req.PluginName != s.pluginID {
+		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权读取插件 %q 的配置", s.pluginID, req.PluginName)
+	}
 	h := getHostHooks()
 	if h.GetConfig == nil {
 		return &sdkv1.GetConfigResponse{}, nil
@@ -339,6 +402,10 @@ func (s *hostServiceServer) GetConfig(_ context.Context, req *sdkv1.GetConfigReq
 }
 
 func (s *hostServiceServer) SetConfig(_ context.Context, req *sdkv1.SetConfigRequest) (*sdkv1.Empty, error) {
+	// 身份隔离：插件只能写自己名字的配置，禁止篡改其他插件配置。
+	if s.pluginID != "" && req.PluginName != s.pluginID {
+		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权修改插件 %q 的配置", s.pluginID, req.PluginName)
+	}
 	h := getHostHooks()
 	if h.SetConfig == nil {
 		return &sdkv1.Empty{}, nil
@@ -353,7 +420,29 @@ func (s *hostServiceServer) SetConfig(_ context.Context, req *sdkv1.SetConfigReq
 	return &sdkv1.Empty{}, nil
 }
 
+// chatLLMLimiter 对插件的 ChatLLM 反向调用做限流（每插件每分钟上限），
+// 防止恶意/失控插件无限调用宿主 LLM 消耗额度。
+func (s *hostServiceServer) chatLLMLimiter() bool {
+	if s.pluginID == "" {
+		return true // 未知身份（旧宿主未设置）不限流，保证兼容
+	}
+	chatLLMRateMu.Lock()
+	defer chatLLMRateMu.Unlock()
+	now := time.Now()
+	e := chatLLMRate[s.pluginID]
+	if e.window.IsZero() || now.Sub(e.window) >= time.Minute {
+		e.window = now
+		e.count = 0
+	}
+	e.count++
+	chatLLMRate[s.pluginID] = e
+	return e.count <= maxChatLLMPerMinute
+}
+
 func (s *hostServiceServer) ChatLLM(_ context.Context, req *sdkv1.ChatLLMRequest) (*sdkv1.ChatLLMResponse, error) {
+	if !s.chatLLMLimiter() {
+		return nil, status.Errorf(codes.ResourceExhausted, "插件 %q ChatLLM 调用过于频繁（每分钟上限 %d 次）", s.pluginID, maxChatLLMPerMinute)
+	}
 	h := getHostHooks()
 	if h.ChatLLM == nil {
 		return &sdkv1.ChatLLMResponse{}, nil
@@ -364,3 +453,14 @@ func (s *hostServiceServer) ChatLLM(_ context.Context, req *sdkv1.ChatLLMRequest
 	}
 	return &sdkv1.ChatLLMResponse{Text: text}, nil
 }
+
+// maxChatLLMPerMinute 每插件每分钟 ChatLLM 反向调用上限。
+const maxChatLLMPerMinute = 30
+
+var (
+	chatLLMRateMu sync.Mutex
+	chatLLMRate   = map[string]struct {
+		window time.Time
+		count  int
+	}{}
+)
