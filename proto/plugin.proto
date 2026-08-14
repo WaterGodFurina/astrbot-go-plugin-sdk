@@ -138,6 +138,11 @@ message HandleHookRequest {
   bytes event_json = 2;
   // JSON of []sdk.Component (current result chain for decoration hooks).
   bytes chain_json = 3;
+  // JSON of the hook-specific payload (e.g. sdk.LLMResponse for
+  // on_llm_response, sdk.ToolCall for on_using_llm_tool/on_llm_tool_respond,
+  // sdk.PluginError for on_plugin_error). Empty for hooks that only need the
+  // event (on_message / on_waiting_llm_request / lifecycle hooks).
+  bytes payload_json = 4;
 }
 
 // HookResponse replaces Empty as the HandleHook return value so hooks can

@@ -87,6 +87,17 @@ func (c *Client) HandleFilter(ctx context.Context, name string, e *Event) (bool,
 // HandleHook invokes a hook handler. For result-decoration hooks, chain is the
 // current result chain and the (possibly decorated) chain is returned.
 func (c *Client) HandleHook(ctx context.Context, name string, e *Event, chain []Component) ([]Component, bool, error) {
+	return c.handleHook(ctx, name, e, chain, nil)
+}
+
+// HandleHookWithPayload invokes a payload-carrying hook handler (on_llm_response,
+// on_using_llm_tool, on_llm_tool_respond, on_plugin_error, lifecycle hooks).
+// payload is JSON-marshaled into the RPC; pass nil for event-only hooks.
+func (c *Client) HandleHookWithPayload(ctx context.Context, name string, e *Event, chain []Component, payload any) ([]Component, bool, error) {
+	return c.handleHook(ctx, name, e, chain, payload)
+}
+
+func (c *Client) handleHook(ctx context.Context, name string, e *Event, chain []Component, payload any) ([]Component, bool, error) {
 	ev, err := json.Marshal(e)
 	if err != nil {
 		return chain, false, err
@@ -97,7 +108,13 @@ func (c *Client) HandleHook(ctx context.Context, name string, e *Event, chain []
 			return chain, false, err
 		}
 	}
-	resp, err := c.svc.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: name, EventJson: ev, ChainJson: chainJSON}, rpcCallOpts...)
+	var payloadJSON []byte
+	if payload != nil {
+		if payloadJSON, err = json.Marshal(payload); err != nil {
+			return chain, false, err
+		}
+	}
+	resp, err := c.svc.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: name, EventJson: ev, ChainJson: chainJSON, PayloadJson: payloadJSON}, rpcCallOpts...)
 	if err != nil {
 		return chain, false, err
 	}

@@ -81,8 +81,47 @@ type Plugin struct {
 	// LLMRequestHooks run before the LLM provider call (Event "on_llm_request"),
 	// letting the plugin inspect/modify the system prompt.
 	LLMRequestHooks []LLMRequestHook
-	// ResultHooks decorate the outgoing reply chain (Event "on_decorating_result").
+	// ResultHooks decorate the outgoing reply chain (Event "on_decorating_result"
+	// or "on_result_handling").
 	ResultHooks []ResultHook
+
+	// MessageHooks observe incoming messages (Event "on_message" /
+	// "on_message_received" / "on_pre_process").
+	MessageHooks []MessageHook
+	// AfterMessageSentHooks fire after the bot's reply is sent
+	// (Event "on_after_message_sent").
+	AfterMessageSentHooks []AfterMessageSentHook
+	// WaitingLLMRequestHooks fire before the LLM call queues
+	// (Event "on_waiting_llm_request").
+	WaitingLLMRequestHooks []WaitingLLMRequestHook
+	// LLMResponseHooks fire after the LLM reply is produced
+	// (Event "on_llm_response").
+	LLMResponseHooks []LLMResponseHook
+	// ToolCallHooks fire before an LLM function tool executes
+	// (Event "on_using_llm_tool").
+	ToolCallHooks []ToolCallHook
+	// ToolRespondHooks fire after an LLM function tool executes
+	// (Event "on_llm_tool_respond").
+	ToolRespondHooks []ToolRespondHook
+	// PluginErrorHooks fire when a plugin handler errors out
+	// (Event "on_plugin_error").
+	PluginErrorHooks []PluginErrorHook
+	// AstrbotLoadedHooks fire after the host finishes loading
+	// (Event "on_astrbot_loaded").
+	AstrbotLoadedHooks []AstrbotLoadedHook
+	// PlatformLoadedHooks fire after a platform adapter finishes loading
+	// (Event "on_platform_loaded").
+	PlatformLoadedHooks []PlatformLoadedHook
+	// PluginLoadedHooks fire after a plugin finishes loading
+	// (Event "on_plugin_loaded").
+	PluginLoadedHooks []PluginLoadedHook
+	// PluginUnloadedHooks fire after a plugin is unloaded
+	// (Event "on_plugin_unloaded").
+	PluginUnloadedHooks []PluginUnloadedHook
+	// AgentBeginHooks fire when an agent run begins (Event "on_agent_begin").
+	AgentBeginHooks []AgentBeginHook
+	// AgentDoneHooks fire when an agent run finishes (Event "on_agent_done").
+	AgentDoneHooks []AgentDoneHook
 	// OnLoad runs inside the plugin process right before the RPC server starts.
 	// Use it for setup / dynamic handler registration. A returned error aborts
 	// plugin startup.

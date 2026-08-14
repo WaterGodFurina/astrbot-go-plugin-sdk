@@ -181,6 +181,45 @@ func (s *serviceServer) Register(context.Context, *sdkv1.RegisterRequest) (*sdkv
 		}
 		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: ev})
 	}
+	for _, h := range s.impl.MessageHooks {
+		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: h.hookEventName()})
+	}
+	for _, h := range s.impl.AfterMessageSentHooks {
+		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnAfterMessageSent})
+	}
+	for _, h := range s.impl.WaitingLLMRequestHooks {
+		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnWaitingLLMRequest})
+	}
+	for _, h := range s.impl.LLMResponseHooks {
+		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnLLMResponse})
+	}
+	for _, h := range s.impl.ToolCallHooks {
+		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnUsingLLMTool})
+	}
+	for _, h := range s.impl.ToolRespondHooks {
+		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnLLMToolRespond})
+	}
+	for _, h := range s.impl.PluginErrorHooks {
+		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnPluginError})
+	}
+	for _, h := range s.impl.AstrbotLoadedHooks {
+		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnAstrbotLoaded})
+	}
+	for _, h := range s.impl.PlatformLoadedHooks {
+		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnPlatformLoaded})
+	}
+	for _, h := range s.impl.PluginLoadedHooks {
+		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnPluginLoaded})
+	}
+	for _, h := range s.impl.PluginUnloadedHooks {
+		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnPluginUnloaded})
+	}
+	for _, h := range s.impl.AgentBeginHooks {
+		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnAgentBegin})
+	}
+	for _, h := range s.impl.AgentDoneHooks {
+		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnAgentDone})
+	}
 	for _, t := range s.impl.Tools {
 		params, err := json.Marshal(t.ParamsSchema)
 		if err != nil {
@@ -249,9 +288,19 @@ func (s *serviceServer) HandleFilter(_ context.Context, req *sdkv1.HandleFilterR
 	return &sdkv1.HandleFilterResponse{Allow: true}, nil
 }
 
+// decodePayload unmarshals a JSON payload into out, tolerating empty input.
+func decodePayload(b []byte, out any) {
+	if len(b) == 0 {
+		return
+	}
+	_ = json.Unmarshal(b, out)
+}
+
 // HandleHook dispatches to a hook handler by name. Result hooks
 // (on_decorating_result / on_result_handling) receive the current result
-// chain and may return a decorated one; generic hooks just run.
+// chain and may return a decorated one; payload-carrying hooks (on_llm_response,
+// on_using_llm_tool, on_llm_tool_respond, on_plugin_error) receive their typed
+// payload; generic hooks just run.
 func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookRequest) (*sdkv1.HookResponse, error) {
 	resp := &sdkv1.HookResponse{Handled: false}
 	if s.impl == nil {
@@ -292,6 +341,202 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		return resp, nil
 	}
 
+	// LLM response hooks (payload: LLMResponse).
+	for _, h := range s.impl.LLMResponseHooks {
+		if h.Name != req.Name {
+			continue
+		}
+		if h.Handler == nil {
+			return resp, nil
+		}
+		pl := &LLMResponse{}
+		decodePayload(req.PayloadJson, pl)
+		if err := h.Handler(e, pl); err != nil {
+			return nil, err
+		}
+		resp.Handled = true
+		return resp, nil
+	}
+
+	// Tool call hooks (payload: ToolCall).
+	for _, h := range s.impl.ToolCallHooks {
+		if h.Name != req.Name {
+			continue
+		}
+		if h.Handler == nil {
+			return resp, nil
+		}
+		call := &ToolCall{}
+		decodePayload(req.PayloadJson, call)
+		if err := h.Handler(e, call); err != nil {
+			return nil, err
+		}
+		resp.Handled = true
+		return resp, nil
+	}
+
+	// Tool respond hooks (payload: ToolCall).
+	for _, h := range s.impl.ToolRespondHooks {
+		if h.Name != req.Name {
+			continue
+		}
+		if h.Handler == nil {
+			return resp, nil
+		}
+		call := &ToolCall{}
+		decodePayload(req.PayloadJson, call)
+		if err := h.Handler(e, call); err != nil {
+			return nil, err
+		}
+		resp.Handled = true
+		return resp, nil
+	}
+
+	// Plugin error hooks (payload: PluginError).
+	for _, h := range s.impl.PluginErrorHooks {
+		if h.Name != req.Name {
+			continue
+		}
+		if h.Handler == nil {
+			return resp, nil
+		}
+		pe := &PluginError{}
+		decodePayload(req.PayloadJson, pe)
+		if err := h.Handler(e, pe); err != nil {
+			return nil, err
+		}
+		resp.Handled = true
+		return resp, nil
+	}
+
+	// Lifecycle hooks with a string payload (platform / plugin name).
+	for _, h := range s.impl.PlatformLoadedHooks {
+		if h.Name != req.Name {
+			continue
+		}
+		if h.Handler == nil {
+			return resp, nil
+		}
+		name := payloadString(req.PayloadJson)
+		if err := h.Handler(name); err != nil {
+			return nil, err
+		}
+		resp.Handled = true
+		return resp, nil
+	}
+	for _, h := range s.impl.PluginLoadedHooks {
+		if h.Name != req.Name {
+			continue
+		}
+		if h.Handler == nil {
+			return resp, nil
+		}
+		if err := h.Handler(payloadString(req.PayloadJson)); err != nil {
+			return nil, err
+		}
+		resp.Handled = true
+		return resp, nil
+	}
+	for _, h := range s.impl.PluginUnloadedHooks {
+		if h.Name != req.Name {
+			continue
+		}
+		if h.Handler == nil {
+			return resp, nil
+		}
+		if err := h.Handler(payloadString(req.PayloadJson)); err != nil {
+			return nil, err
+		}
+		resp.Handled = true
+		return resp, nil
+	}
+	for _, h := range s.impl.AstrbotLoadedHooks {
+		if h.Name != req.Name {
+			continue
+		}
+		if h.Handler == nil {
+			return resp, nil
+		}
+		if err := h.Handler(); err != nil {
+			return nil, err
+		}
+		resp.Handled = true
+		return resp, nil
+	}
+
+	// Agent hooks (on_agent_begin / on_agent_done).
+	for _, h := range s.impl.AgentBeginHooks {
+		if h.Name != req.Name {
+			continue
+		}
+		if h.Handler == nil {
+			return resp, nil
+		}
+		if err := h.Handler(e); err != nil {
+			return nil, err
+		}
+		resp.Handled = true
+		return resp, nil
+	}
+	for _, h := range s.impl.AgentDoneHooks {
+		if h.Name != req.Name {
+			continue
+		}
+		if h.Handler == nil {
+			return resp, nil
+		}
+		pl := &LLMResponse{}
+		decodePayload(req.PayloadJson, pl)
+		if err := h.Handler(e, pl); err != nil {
+			return nil, err
+		}
+		resp.Handled = true
+		return resp, nil
+	}
+
+	// Event-only message hooks (on_message / on_message_received / on_pre_process).
+	for _, h := range s.impl.MessageHooks {
+		if h.Name != req.Name {
+			continue
+		}
+		if h.Handler == nil {
+			return resp, nil
+		}
+		if err := h.Handler(e); err != nil {
+			return nil, err
+		}
+		resp.Handled = true
+		return resp, nil
+	}
+
+	// After-message-sent / waiting-llm-request hooks (event-only).
+	for _, h := range s.impl.AfterMessageSentHooks {
+		if h.Name != req.Name {
+			continue
+		}
+		if h.Handler == nil {
+			return resp, nil
+		}
+		if err := h.Handler(e); err != nil {
+			return nil, err
+		}
+		resp.Handled = true
+		return resp, nil
+	}
+	for _, h := range s.impl.WaitingLLMRequestHooks {
+		if h.Name != req.Name {
+			continue
+		}
+		if h.Handler == nil {
+			return resp, nil
+		}
+		if err := h.Handler(e); err != nil {
+			return nil, err
+		}
+		resp.Handled = true
+		return resp, nil
+	}
+
 	for _, h := range s.impl.Hooks {
 		if h.Name != req.Name {
 			continue
@@ -306,6 +551,29 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		return resp, nil
 	}
 	return resp, nil
+}
+
+// payloadString decodes a payload that is either a bare JSON string or an
+// object with a "name"/"platform"/"plugin_name" string field, returning "" when
+// empty.
+func payloadString(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(b, &s) == nil {
+		return s
+	}
+	var m map[string]string
+	if json.Unmarshal(b, &m) != nil {
+		return ""
+	}
+	for _, k := range []string{"plugin_name", "platform", "name"} {
+		if v, ok := m[k]; ok {
+			return v
+		}
+	}
+	return ""
 }
 
 // HandleLLMRequest invokes an on_llm_request hook, letting the plugin modify

@@ -24,6 +24,20 @@ type registry struct {
 	tools           []Tool
 	llmRequestHooks []LLMRequestHook
 	resultHooks     []ResultHook
+
+	messageHooks           []MessageHook
+	afterMessageSentHooks  []AfterMessageSentHook
+	waitingLLMRequestHooks []WaitingLLMRequestHook
+	llmResponseHooks       []LLMResponseHook
+	toolCallHooks          []ToolCallHook
+	toolRespondHooks       []ToolRespondHook
+	pluginErrorHooks       []PluginErrorHook
+	astrbotLoadedHooks     []AstrbotLoadedHook
+	platformLoadedHooks    []PlatformLoadedHook
+	pluginLoadedHooks      []PluginLoadedHook
+	pluginUnloadedHooks    []PluginUnloadedHook
+	agentBeginHooks        []AgentBeginHook
+	agentDoneHooks         []AgentDoneHook
 }
 
 // RegisterCommand adds a command to the global registry (merged at Serve time).
@@ -74,6 +88,110 @@ func RegisterResultHook(h ResultHook) {
 	global.resultHooks = append(global.resultHooks, h)
 }
 
+// RegisterMessageHook adds a hook that observes incoming messages
+// (Event "on_message", "on_message_received" or "on_pre_process").
+func RegisterMessageHook(h MessageHook) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.messageHooks = append(global.messageHooks, h)
+}
+
+// RegisterAfterMessageSentHook adds a hook that fires after the bot's reply is
+// sent (Event "on_after_message_sent").
+func RegisterAfterMessageSentHook(h AfterMessageSentHook) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.afterMessageSentHooks = append(global.afterMessageSentHooks, h)
+}
+
+// RegisterWaitingLLMRequestHook adds a hook that fires before the LLM call
+// queues (Event "on_waiting_llm_request").
+func RegisterWaitingLLMRequestHook(h WaitingLLMRequestHook) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.waitingLLMRequestHooks = append(global.waitingLLMRequestHooks, h)
+}
+
+// RegisterLLMResponseHook adds a hook that fires after the LLM reply is
+// produced (Event "on_llm_response").
+func RegisterLLMResponseHook(h LLMResponseHook) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.llmResponseHooks = append(global.llmResponseHooks, h)
+}
+
+// RegisterToolCallHook adds a hook that fires before an LLM function tool
+// executes (Event "on_using_llm_tool").
+func RegisterToolCallHook(h ToolCallHook) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.toolCallHooks = append(global.toolCallHooks, h)
+}
+
+// RegisterToolRespondHook adds a hook that fires after an LLM function tool
+// executes (Event "on_llm_tool_respond").
+func RegisterToolRespondHook(h ToolRespondHook) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.toolRespondHooks = append(global.toolRespondHooks, h)
+}
+
+// RegisterPluginErrorHook adds a hook that fires when a plugin handler errors
+// out (Event "on_plugin_error").
+func RegisterPluginErrorHook(h PluginErrorHook) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.pluginErrorHooks = append(global.pluginErrorHooks, h)
+}
+
+// RegisterAstrbotLoadedHook adds a hook that fires after the host finishes
+// loading (Event "on_astrbot_loaded").
+func RegisterAstrbotLoadedHook(h AstrbotLoadedHook) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.astrbotLoadedHooks = append(global.astrbotLoadedHooks, h)
+}
+
+// RegisterPlatformLoadedHook adds a hook that fires after a platform adapter
+// finishes loading (Event "on_platform_loaded").
+func RegisterPlatformLoadedHook(h PlatformLoadedHook) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.platformLoadedHooks = append(global.platformLoadedHooks, h)
+}
+
+// RegisterPluginLoadedHook adds a hook that fires after a plugin finishes
+// loading (Event "on_plugin_loaded").
+func RegisterPluginLoadedHook(h PluginLoadedHook) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.pluginLoadedHooks = append(global.pluginLoadedHooks, h)
+}
+
+// RegisterPluginUnloadedHook adds a hook that fires after a plugin is unloaded
+// (Event "on_plugin_unloaded").
+func RegisterPluginUnloadedHook(h PluginUnloadedHook) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.pluginUnloadedHooks = append(global.pluginUnloadedHooks, h)
+}
+
+// RegisterAgentBeginHook adds a hook that fires when an agent run begins
+// (Event "on_agent_begin").
+func RegisterAgentBeginHook(h AgentBeginHook) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.agentBeginHooks = append(global.agentBeginHooks, h)
+}
+
+// RegisterAgentDoneHook adds a hook that fires when an agent run finishes
+// (Event "on_agent_done").
+func RegisterAgentDoneHook(h AgentDoneHook) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.agentDoneHooks = append(global.agentDoneHooks, h)
+}
+
 // drain merges the global registry into p, preserving p's own entries after
 // the registered ones. Called by Serve after OnLoad so registrations made from
 // init()/OnLoad() are all captured.
@@ -109,4 +227,27 @@ func (r *registry) drain(p *Plugin) {
 	results = append(results, r.resultHooks...)
 	results = append(results, p.ResultHooks...)
 	p.ResultHooks = results
+
+	p.MessageHooks = merge(r.messageHooks, p.MessageHooks)
+	p.AfterMessageSentHooks = merge(r.afterMessageSentHooks, p.AfterMessageSentHooks)
+	p.WaitingLLMRequestHooks = merge(r.waitingLLMRequestHooks, p.WaitingLLMRequestHooks)
+	p.LLMResponseHooks = merge(r.llmResponseHooks, p.LLMResponseHooks)
+	p.ToolCallHooks = merge(r.toolCallHooks, p.ToolCallHooks)
+	p.ToolRespondHooks = merge(r.toolRespondHooks, p.ToolRespondHooks)
+	p.PluginErrorHooks = merge(r.pluginErrorHooks, p.PluginErrorHooks)
+	p.AstrbotLoadedHooks = merge(r.astrbotLoadedHooks, p.AstrbotLoadedHooks)
+	p.PlatformLoadedHooks = merge(r.platformLoadedHooks, p.PlatformLoadedHooks)
+	p.PluginLoadedHooks = merge(r.pluginLoadedHooks, p.PluginLoadedHooks)
+	p.PluginUnloadedHooks = merge(r.pluginUnloadedHooks, p.PluginUnloadedHooks)
+	p.AgentBeginHooks = merge(r.agentBeginHooks, p.AgentBeginHooks)
+	p.AgentDoneHooks = merge(r.agentDoneHooks, p.AgentDoneHooks)
+}
+
+// merge prepends registered (imperative) entries before the plugin's own
+// declarative entries, preserving order.
+func merge[T any](registered, declared []T) []T {
+	out := make([]T, 0, len(registered)+len(declared))
+	out = append(out, registered...)
+	out = append(out, declared...)
+	return out
 }
