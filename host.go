@@ -139,9 +139,9 @@ func (h *host) SendMessage(platform, sessionID string, chain []Component) error 
 		return err
 	}
 	_, err = svc.SendMessage(context.Background(), &sdkv1.SendMessageRequest{
-		Platform:   platform,
-		SessionId:  sessionID,
-		ChainJson:  chainJSON,
+		Platform:  platform,
+		SessionId: sessionID,
+		ChainJson: chainJSON,
 	})
 	return err
 }
@@ -153,8 +153,8 @@ func (h *host) RecallMessage(platform, messageID string) error {
 		return err
 	}
 	_, err = svc.RecallMessage(context.Background(), &sdkv1.RecallMessageRequest{
-		Platform:   platform,
-		MessageId:  messageID,
+		Platform:  platform,
+		MessageId: messageID,
 	})
 	return err
 }
@@ -202,7 +202,7 @@ func (h *host) SetConfig(pluginName string, cfg map[string]any) error {
 
 // ChatLLM calls the host's default chat LLM provider with the given prompt and
 // returns the model's reply text. It does not execute tool calls.
-func (h *host) ChatLLM(prompt, systemPrompt string) (string, error) {
+func (h *host) ChatLLM(prompt, systemPrompt string, imageURLs []string) (string, error) {
 	svc, err := hostServiceClient()
 	if err != nil {
 		return "", err
@@ -210,11 +210,44 @@ func (h *host) ChatLLM(prompt, systemPrompt string) (string, error) {
 	resp, err := svc.ChatLLM(context.Background(), &sdkv1.ChatLLMRequest{
 		Prompt:       prompt,
 		SystemPrompt: systemPrompt,
+		ImageUrls:    imageURLs,
 	})
 	if err != nil {
 		return "", err
 	}
 	return resp.Text, nil
+}
+
+// React adds an emoji reaction to a message on a platform adapter.
+func (h *host) React(platform, sessionID, messageID, emoji string) error {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return err
+	}
+	_, err = svc.React(context.Background(), &sdkv1.ReactRequest{
+		Platform:  platform,
+		SessionId: sessionID,
+		MessageId: messageID,
+		Emoji:     emoji,
+	})
+	return err
+}
+
+// TextToImage renders text into an image via the host t2i engine, returning
+// base64-encoded PNG bytes.
+func (h *host) TextToImage(text, templateName string) (string, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return "", err
+	}
+	resp, err := svc.TextToImage(context.Background(), &sdkv1.TextToImageRequest{
+		Text:         text,
+		TemplateName: templateName,
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.ImageBase64, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -235,7 +268,12 @@ type HostServiceHooks struct {
 	// SetConfig persists the plugin's full config map.
 	SetConfig func(pluginName string, cfg map[string]any) error
 	// ChatLLM calls the default chat provider with prompt + system prompt.
-	ChatLLM func(prompt, systemPrompt string) (string, error)
+	// imageURLs (may be nil) are appended as multimodal content parts.
+	ChatLLM func(prompt, systemPrompt string, imageURLs []string) (string, error)
+	// React adds an emoji reaction to a message on a platform.
+	React func(platform, sessionID, messageID, emoji string) error
+	// TextToImage renders text into an image, returning base64 PNG bytes.
+	TextToImage func(text, templateName string) (string, error)
 }
 
 var (
@@ -447,11 +485,33 @@ func (s *hostServiceServer) ChatLLM(_ context.Context, req *sdkv1.ChatLLMRequest
 	if h.ChatLLM == nil {
 		return &sdkv1.ChatLLMResponse{}, nil
 	}
-	text, err := h.ChatLLM(req.Prompt, req.SystemPrompt)
+	text, err := h.ChatLLM(req.Prompt, req.SystemPrompt, req.ImageUrls)
 	if err != nil {
 		return nil, err
 	}
 	return &sdkv1.ChatLLMResponse{Text: text}, nil
+}
+
+// React adds an emoji reaction to a message on a platform adapter.
+func (s *hostServiceServer) React(_ context.Context, req *sdkv1.ReactRequest) (*sdkv1.Empty, error) {
+	h := getHostHooks()
+	if h.React == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	return &sdkv1.Empty{}, h.React(req.Platform, req.SessionId, req.MessageId, req.Emoji)
+}
+
+// TextToImage renders text into an image via the host t2i engine.
+func (s *hostServiceServer) TextToImage(_ context.Context, req *sdkv1.TextToImageRequest) (*sdkv1.TextToImageResponse, error) {
+	h := getHostHooks()
+	if h.TextToImage == nil {
+		return &sdkv1.TextToImageResponse{}, nil
+	}
+	b64, err := h.TextToImage(req.Text, req.TemplateName)
+	if err != nil {
+		return nil, err
+	}
+	return &sdkv1.TextToImageResponse{ImageBase64: b64}, nil
 }
 
 // maxChatLLMPerMinute 每插件每分钟 ChatLLM 反向调用上限。

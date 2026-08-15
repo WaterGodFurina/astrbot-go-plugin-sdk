@@ -125,7 +125,7 @@ type Plugin struct {
 	// OnLoad runs inside the plugin process right before the RPC server starts.
 	// Use it for setup / dynamic handler registration. A returned error aborts
 	// plugin startup.
-	OnLoad   func() error
+	OnLoad func() error
 	// OnConfig 目前仅供声明，SDK 尚未在运行时主动调用它（宿主端配置变更
 	// 暂不主动推送）。插件可通过 Host.GetConfig 主动读取配置。
 	OnConfig func(cfg *Config) error

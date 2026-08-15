@@ -441,6 +441,8 @@ const (
 	HostService_GetConfig_FullMethodName     = "/astrbot.sdk.v1.HostService/GetConfig"
 	HostService_SetConfig_FullMethodName     = "/astrbot.sdk.v1.HostService/SetConfig"
 	HostService_ChatLLM_FullMethodName       = "/astrbot.sdk.v1.HostService/ChatLLM"
+	HostService_React_FullMethodName         = "/astrbot.sdk.v1.HostService/React"
+	HostService_TextToImage_FullMethodName   = "/astrbot.sdk.v1.HostService/TextToImage"
 )
 
 // HostServiceClient is the client API for HostService service.
@@ -461,6 +463,11 @@ type HostServiceClient interface {
 	SetConfig(ctx context.Context, in *SetConfigRequest, opts ...grpc.CallOption) (*Empty, error)
 	// ChatLLM calls the host's default chat LLM provider and returns the reply.
 	ChatLLM(ctx context.Context, in *ChatLLMRequest, opts ...grpc.CallOption) (*ChatLLMResponse, error)
+	// React adds an emoji reaction to a message (platforms supporting it).
+	React(ctx context.Context, in *ReactRequest, opts ...grpc.CallOption) (*Empty, error)
+	// TextToImage renders text into an image (host t2i engine) and returns the
+	// PNG bytes (base64). The plugin can then send it as an Image component.
+	TextToImage(ctx context.Context, in *TextToImageRequest, opts ...grpc.CallOption) (*TextToImageResponse, error)
 }
 
 type hostServiceClient struct {
@@ -531,6 +538,26 @@ func (c *hostServiceClient) ChatLLM(ctx context.Context, in *ChatLLMRequest, opt
 	return out, nil
 }
 
+func (c *hostServiceClient) React(ctx context.Context, in *ReactRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_React_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) TextToImage(ctx context.Context, in *TextToImageRequest, opts ...grpc.CallOption) (*TextToImageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TextToImageResponse)
+	err := c.cc.Invoke(ctx, HostService_TextToImage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // HostServiceServer is the server API for HostService service.
 // All implementations must embed UnimplementedHostServiceServer
 // for forward compatibility.
@@ -549,6 +576,11 @@ type HostServiceServer interface {
 	SetConfig(context.Context, *SetConfigRequest) (*Empty, error)
 	// ChatLLM calls the host's default chat LLM provider and returns the reply.
 	ChatLLM(context.Context, *ChatLLMRequest) (*ChatLLMResponse, error)
+	// React adds an emoji reaction to a message (platforms supporting it).
+	React(context.Context, *ReactRequest) (*Empty, error)
+	// TextToImage renders text into an image (host t2i engine) and returns the
+	// PNG bytes (base64). The plugin can then send it as an Image component.
+	TextToImage(context.Context, *TextToImageRequest) (*TextToImageResponse, error)
 	mustEmbedUnimplementedHostServiceServer()
 }
 
@@ -576,6 +608,12 @@ func (UnimplementedHostServiceServer) SetConfig(context.Context, *SetConfigReque
 }
 func (UnimplementedHostServiceServer) ChatLLM(context.Context, *ChatLLMRequest) (*ChatLLMResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ChatLLM not implemented")
+}
+func (UnimplementedHostServiceServer) React(context.Context, *ReactRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method React not implemented")
+}
+func (UnimplementedHostServiceServer) TextToImage(context.Context, *TextToImageRequest) (*TextToImageResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method TextToImage not implemented")
 }
 func (UnimplementedHostServiceServer) mustEmbedUnimplementedHostServiceServer() {}
 func (UnimplementedHostServiceServer) testEmbeddedByValue()                     {}
@@ -706,6 +744,42 @@ func _HostService_ChatLLM_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HostService_React_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReactRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).React(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_React_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).React(ctx, req.(*ReactRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_TextToImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TextToImageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).TextToImage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_TextToImage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).TextToImage(ctx, req.(*TextToImageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // HostService_ServiceDesc is the grpc.ServiceDesc for HostService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -736,6 +810,14 @@ var HostService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ChatLLM",
 			Handler:    _HostService_ChatLLM_Handler,
+		},
+		{
+			MethodName: "React",
+			Handler:    _HostService_React_Handler,
+		},
+		{
+			MethodName: "TextToImage",
+			Handler:    _HostService_TextToImage_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

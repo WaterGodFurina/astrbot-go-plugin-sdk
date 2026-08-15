@@ -150,11 +150,11 @@ func (s *serviceServer) Register(context.Context, *sdkv1.RegisterRequest) (*sdkv
 		schema = []byte("{}")
 	}
 	resp := &sdkv1.RegisterResponse{
-		Name:              s.impl.Name,
-		Version:           s.impl.Version,
-		Description:       s.impl.Description,
-		Author:            s.impl.Author,
-		ConfigSchemaJson:  schema,
+		Name:             s.impl.Name,
+		Version:          s.impl.Version,
+		Description:      s.impl.Description,
+		Author:           s.impl.Author,
+		ConfigSchemaJson: schema,
 	}
 	for _, c := range s.impl.Commands {
 		resp.Commands = append(resp.Commands, &sdkv1.CommandDesc{

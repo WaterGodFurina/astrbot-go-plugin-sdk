@@ -61,6 +61,11 @@ service HostService {
   rpc SetConfig(SetConfigRequest) returns (Empty);
   // ChatLLM calls the host's default chat LLM provider and returns the reply.
   rpc ChatLLM(ChatLLMRequest) returns (ChatLLMResponse);
+  // React adds an emoji reaction to a message (platforms supporting it).
+  rpc React(ReactRequest) returns (Empty);
+  // TextToImage renders text into an image (host t2i engine) and returns the
+  // PNG bytes (base64). The plugin can then send it as an Image component.
+  rpc TextToImage(TextToImageRequest) returns (TextToImageResponse);
 }
 
 message Empty {}
@@ -248,9 +253,35 @@ message ChatLLMRequest {
   // Optional session id (unified message origin) used to resolve the session's
   // preferred provider. Empty = default provider.
   string session_id = 3;
+  // Optional image URLs/paths/base64 appended to the user message
+  // (multimodal request).
+  repeated string image_urls = 4;
 }
 
 message ChatLLMResponse {
   // The model's reply text.
   string text = 1;
+}
+
+message ReactRequest {
+  // Platform adapter id (e.g. "qq_official").
+  string platform = 1;
+  // Conversation id (group id or friend user id).
+  string session_id = 2;
+  // Platform message id to react to.
+  string message_id = 3;
+  // Emoji to add (e.g. "👍").
+  string emoji = 4;
+}
+
+message TextToImageRequest {
+  // Text to render into an image.
+  string text = 1;
+  // Optional t2i template name (host-dependent; empty = default).
+  string template_name = 2;
+}
+
+message TextToImageResponse {
+  // PNG image bytes, base64-encoded (no data: prefix).
+  string image_base64 = 1;
 }
