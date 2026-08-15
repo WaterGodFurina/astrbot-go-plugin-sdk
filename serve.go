@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
@@ -229,6 +231,13 @@ func (s *serviceServer) Register(context.Context, *sdkv1.RegisterRequest) (*sdkv
 			Name:        t.Name,
 			Description: t.Description,
 			ParamsJson:  params,
+		})
+	}
+	for _, w := range s.impl.WebAPIs {
+		resp.WebApis = append(resp.WebApis, &sdkv1.WebApiDesc{
+			Route:       w.Route,
+			Methods:     w.Methods,
+			Description: w.Desc,
 		})
 	}
 	return resp, nil
@@ -650,6 +659,102 @@ func (s *serviceServer) HealthCheck(context.Context, *sdkv1.Empty) (*sdkv1.Healt
 	resp := &sdkv1.HealthResponse{Ok: true}
 	if s.impl != nil {
 		resp.Version = s.impl.Version
+	}
+	return resp, nil
+}
+
+// webRoutePattern converts a plugin route like "/emoji/<category>" into a
+// regex with named groups; plain segments match exactly.
+func webRoutePattern(route string) (*regexp.Regexp, []string, error) {
+	normalized := route
+	if !strings.HasPrefix(normalized, "/") {
+		normalized = "/" + normalized
+	}
+	re := regexp.MustCompile(`<([^>]+)>`)
+	var names []string
+	chunks := strings.Split(normalized, "/")
+	pattern := ""
+	for _, c := range chunks {
+		if c == "" {
+			continue
+		}
+		m := re.FindStringSubmatch(c)
+		if len(m) == 2 {
+			name := m[1]
+			names = append(names, name)
+			pattern += "/" + regexp.QuoteMeta(re.ReplaceAllString(c, "")) + "([^/]+)"
+		} else {
+			pattern += "/" + regexp.QuoteMeta(c)
+		}
+	}
+	if pattern == "" {
+		pattern = "/"
+	}
+	re, err := regexp.Compile("^" + pattern + "$")
+	return re, names, err
+}
+
+// HandleWebRequest dispatches a proxied dashboard HTTP request to a
+// plugin-registered Web API (WebAPIs). Returns 404 when no route matches.
+func (s *serviceServer) HandleWebRequest(_ context.Context, req *sdkv1.HandleWebRequestRequest) (*sdkv1.HandleWebRequestResponse, error) {
+	resp := &sdkv1.HandleWebRequestResponse{StatusCode: 404}
+	if s.impl == nil {
+		return resp, nil
+	}
+	path := req.Path
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	method := strings.ToUpper(req.Method)
+	for _, w := range s.impl.WebAPIs {
+		match := false
+		for _, m := range w.Methods {
+			if strings.EqualFold(m, method) || strings.EqualFold(m, "ANY") {
+				match = true
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		re, _, err := webRoutePattern(w.Route)
+		if err != nil {
+			continue
+		}
+		sm := re.FindStringSubmatch(path)
+		if sm == nil {
+			continue
+		}
+		query := map[string][]string{}
+		for _, kv := range req.Query {
+			query[kv.Key] = append(query[kv.Key], kv.Value)
+		}
+		headers := map[string][]string{}
+		for _, kv := range req.Headers {
+			headers[kv.Key] = append(headers[kv.Key], kv.Value)
+		}
+		pathParams := map[string]string{}
+		names := re.SubexpNames()
+		for i, n := range names {
+			if i > 0 && n != "" {
+				pathParams[n] = sm[i]
+			}
+		}
+		if w.Handler == nil {
+			return resp, nil
+		}
+		status, respHeaders, body, err := w.Handler(method, path, query, headers, req.Body, pathParams)
+		if err != nil {
+			return &sdkv1.HandleWebRequestResponse{
+				StatusCode: 500,
+				Body:       []byte(`{"status":"error","message":"` + err.Error() + `"}`),
+			}, nil
+		}
+		out := &sdkv1.HandleWebRequestResponse{StatusCode: int32(status), Body: body}
+		for k, v := range respHeaders {
+			out.Headers = append(out.Headers, &sdkv1.WebKV{Key: k, Value: v})
+		}
+		return out, nil
 	}
 	return resp, nil
 }

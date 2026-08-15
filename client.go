@@ -167,6 +167,13 @@ func (c *Client) HandleTool(ctx context.Context, name string, args map[string]an
 	return resp.Text, resp.IsError, nil
 }
 
+// HandleWebRequest dispatches a dashboard HTTP request to a plugin-registered
+// Web API (the host proxies /api/plug/<plugin>/<path> here). Returns the
+// response status, headers and body.
+func (c *Client) HandleWebRequest(ctx context.Context, req *sdkv1.HandleWebRequestRequest) (*sdkv1.HandleWebRequestResponse, error) {
+	return c.svc.HandleWebRequest(ctx, req, rpcCallOpts...)
+}
+
 // HealthCheck probes the plugin's liveness.
 func (c *Client) HealthCheck(ctx context.Context) (*sdkv1.HealthResponse, error) {
 	return c.svc.HealthCheck(ctx, &sdkv1.Empty{}, rpcCallOpts...)

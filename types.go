@@ -122,6 +122,9 @@ type Plugin struct {
 	AgentBeginHooks []AgentBeginHook
 	// AgentDoneHooks fire when an agent run finishes (Event "on_agent_done").
 	AgentDoneHooks []AgentDoneHook
+	// WebAPIs are dashboard Web UI API routes served by the host under
+	// /api/plug/<plugin>/<route> (mirrors Python's context.register_web_api).
+	WebAPIs []WebAPI
 	// OnLoad runs inside the plugin process right before the RPC server starts.
 	// Use it for setup / dynamic handler registration. A returned error aborts
 	// plugin startup.
@@ -142,6 +145,19 @@ type Tool struct {
 	// ({"type":"object","properties":{...},"required":[...]}).
 	ParamsSchema map[string]any
 	Handler      func(e *Event, args map[string]any) (string, error)
+}
+
+// WebAPI is a dashboard Web UI API route served by the host under
+// /api/plug/<plugin>/<route>. Route supports dynamic <param> segments (e.g.
+// "/emoji/<category>"), matched at request time and passed to Handler.
+type WebAPI struct {
+	Route   string   // e.g. "/emoji/<category>"
+	Methods []string // e.g. []string{"GET"}
+	Desc    string
+	// Handler processes the proxied HTTP request. query/headers are multi-value
+	// maps, pathParams holds the dynamic route values. Returns the HTTP status
+	// code, response headers and response body.
+	Handler func(method, path string, query, headers map[string][]string, body []byte, pathParams map[string]string) (int, map[string]string, []byte, error)
 }
 
 // ProviderRequest is a serializable view of an LLM request that on_llm_request

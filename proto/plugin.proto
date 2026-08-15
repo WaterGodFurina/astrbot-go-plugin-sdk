@@ -41,6 +41,9 @@ service PluginService {
   rpc HandleLLMRequest(HandleLLMRequestRequest) returns (HandleLLMRequestResponse);
   // HandleTool invokes a registered LLM function tool.
   rpc HandleTool(HandleToolRequest) returns (HandleToolResponse);
+  // HandleWebRequest dispatches a dashboard HTTP request to a plugin-registered
+  // Web API (context.register_web_api / /api/plug/<path>).
+  rpc HandleWebRequest(HandleWebRequestRequest) returns (HandleWebRequestResponse);
   // HealthCheck is used for keep-alive/readiness probing.
   rpc HealthCheck(Empty) returns (HealthResponse);
   // Cleanup is called when the host unloads the plugin.
@@ -111,6 +114,49 @@ message RegisterResponse {
   // JSON of the plugin's config schema (map[string]any).
   bytes config_schema_json = 8;
   repeated ToolDesc tools = 9;
+  // Web APIs registered via context.register_web_api (Python SDK).
+  repeated WebApiDesc web_apis = 10;
+}
+
+// WebApiDesc describes a Web UI API route a plugin registered
+// (context.register_web_api). The host proxies /api/plug/<plugin>/<route>
+// requests to the plugin process, which matches the route (including dynamic
+// <param> segments) and runs the handler.
+message WebApiDesc {
+  // Route pattern like "/meme_manager/emoji/<category>" (or without the
+  // leading plugin segment).
+  string route = 1;
+  repeated string methods = 2;
+  string description = 3;
+}
+
+message WebKV {
+  string key = 1;
+  string value = 2;
+}
+
+message WebUploadFile {
+  string field = 1;
+  string filename = 2;
+  string content_type = 3;
+  bytes content = 4;
+}
+
+message HandleWebRequestRequest {
+  string method = 1;
+  // Sub-path after /api/plug/<plugin_name>/ (e.g. "emoji/happy").
+  string path = 2;
+  // Multi-value query string pairs.
+  repeated WebKV query = 3;
+  repeated WebKV headers = 4;
+  bytes body = 5;
+  repeated WebUploadFile files = 6;
+}
+
+message HandleWebRequestResponse {
+  int32 status_code = 1;
+  repeated WebKV headers = 2;
+  bytes body = 3;
 }
 
 message HandleCommandRequest {

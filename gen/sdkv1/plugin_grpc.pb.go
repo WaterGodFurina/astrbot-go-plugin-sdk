@@ -45,6 +45,7 @@ const (
 	PluginService_HandleHook_FullMethodName       = "/astrbot.sdk.v1.PluginService/HandleHook"
 	PluginService_HandleLLMRequest_FullMethodName = "/astrbot.sdk.v1.PluginService/HandleLLMRequest"
 	PluginService_HandleTool_FullMethodName       = "/astrbot.sdk.v1.PluginService/HandleTool"
+	PluginService_HandleWebRequest_FullMethodName = "/astrbot.sdk.v1.PluginService/HandleWebRequest"
 	PluginService_HealthCheck_FullMethodName      = "/astrbot.sdk.v1.PluginService/HealthCheck"
 	PluginService_Cleanup_FullMethodName          = "/astrbot.sdk.v1.PluginService/Cleanup"
 )
@@ -71,6 +72,9 @@ type PluginServiceClient interface {
 	HandleLLMRequest(ctx context.Context, in *HandleLLMRequestRequest, opts ...grpc.CallOption) (*HandleLLMRequestResponse, error)
 	// HandleTool invokes a registered LLM function tool.
 	HandleTool(ctx context.Context, in *HandleToolRequest, opts ...grpc.CallOption) (*HandleToolResponse, error)
+	// HandleWebRequest dispatches a dashboard HTTP request to a plugin-registered
+	// Web API (context.register_web_api / /api/plug/<path>).
+	HandleWebRequest(ctx context.Context, in *HandleWebRequestRequest, opts ...grpc.CallOption) (*HandleWebRequestResponse, error)
 	// HealthCheck is used for keep-alive/readiness probing.
 	HealthCheck(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*HealthResponse, error)
 	// Cleanup is called when the host unloads the plugin.
@@ -145,6 +149,16 @@ func (c *pluginServiceClient) HandleTool(ctx context.Context, in *HandleToolRequ
 	return out, nil
 }
 
+func (c *pluginServiceClient) HandleWebRequest(ctx context.Context, in *HandleWebRequestRequest, opts ...grpc.CallOption) (*HandleWebRequestResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HandleWebRequestResponse)
+	err := c.cc.Invoke(ctx, PluginService_HandleWebRequest_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *pluginServiceClient) HealthCheck(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*HealthResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(HealthResponse)
@@ -187,6 +201,9 @@ type PluginServiceServer interface {
 	HandleLLMRequest(context.Context, *HandleLLMRequestRequest) (*HandleLLMRequestResponse, error)
 	// HandleTool invokes a registered LLM function tool.
 	HandleTool(context.Context, *HandleToolRequest) (*HandleToolResponse, error)
+	// HandleWebRequest dispatches a dashboard HTTP request to a plugin-registered
+	// Web API (context.register_web_api / /api/plug/<path>).
+	HandleWebRequest(context.Context, *HandleWebRequestRequest) (*HandleWebRequestResponse, error)
 	// HealthCheck is used for keep-alive/readiness probing.
 	HealthCheck(context.Context, *Empty) (*HealthResponse, error)
 	// Cleanup is called when the host unloads the plugin.
@@ -218,6 +235,9 @@ func (UnimplementedPluginServiceServer) HandleLLMRequest(context.Context, *Handl
 }
 func (UnimplementedPluginServiceServer) HandleTool(context.Context, *HandleToolRequest) (*HandleToolResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method HandleTool not implemented")
+}
+func (UnimplementedPluginServiceServer) HandleWebRequest(context.Context, *HandleWebRequestRequest) (*HandleWebRequestResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method HandleWebRequest not implemented")
 }
 func (UnimplementedPluginServiceServer) HealthCheck(context.Context, *Empty) (*HealthResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method HealthCheck not implemented")
@@ -354,6 +374,24 @@ func _PluginService_HandleTool_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PluginService_HandleWebRequest_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HandleWebRequestRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).HandleWebRequest(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_HandleWebRequest_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).HandleWebRequest(ctx, req.(*HandleWebRequestRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _PluginService_HealthCheck_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(Empty)
 	if err := dec(in); err != nil {
@@ -420,6 +458,10 @@ var PluginService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "HandleTool",
 			Handler:    _PluginService_HandleTool_Handler,
+		},
+		{
+			MethodName: "HandleWebRequest",
+			Handler:    _PluginService_HandleWebRequest_Handler,
 		},
 		{
 			MethodName: "HealthCheck",
