@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
@@ -63,6 +64,7 @@ func Serve(p *Plugin) {
 		Level:  hclog.Info,
 		Output: os.Stderr,
 	})
+	setServiceLogger(logger)
 	plugins := map[string]plugin.Plugin{
 		"plugin_service": &PluginServiceGRPCPlugin{Impl: p},
 	}
@@ -72,6 +74,20 @@ func Serve(p *Plugin) {
 		GRPCServer:      grpcServer,
 		Logger:          logger,
 	})
+}
+
+// serviceLogger is the plugin's hclog logger created in Serve. SetLogLevel
+// adjusts its level at runtime; guarded by logMu (Serve runs on the plugin's
+// main goroutine, SetLogLevel on a gRPC worker).
+var (
+	logMu         sync.Mutex
+	serviceLogger hclog.Logger
+)
+
+func setServiceLogger(l hclog.Logger) {
+	logMu.Lock()
+	serviceLogger = l
+	logMu.Unlock()
 }
 
 // PluginServiceGRPCPlugin implements go-plugin's GRPCPlugin for the plugin
@@ -243,6 +259,19 @@ func (s *serviceServer) Register(context.Context, *sdkv1.RegisterRequest) (*sdkv
 	return resp, nil
 }
 
+// eventResult builds the EventResult sub-message attached to every handler
+// response. The Go SDK has no send-operation tracking (unlike the Python
+// _has_send_oper), so Sent stays false; StopPropagation mirrors the legacy
+// `stop` flag and Handled marks "the handler produced a result". New hosts
+// read from `result`; old hosts keep reading the legacy fields, which the
+// call sites below still set.
+func eventResult(handled, stop bool) *sdkv1.EventResult {
+	return &sdkv1.EventResult{
+		Handled:         handled,
+		StopPropagation: stop,
+	}
+}
+
 // HandleCommand dispatches to a command handler by name.
 func (s *serviceServer) HandleCommand(_ context.Context, req *sdkv1.HandleCommandRequest) (*sdkv1.HandleCommandResponse, error) {
 	if s.impl == nil {
@@ -253,7 +282,7 @@ func (s *serviceServer) HandleCommand(_ context.Context, req *sdkv1.HandleComman
 		if c.Name != req.Name {
 			continue
 		}
-		resp := &sdkv1.HandleCommandResponse{}
+		resp := &sdkv1.HandleCommandResponse{Result: eventResult(true, false)}
 		if c.ChainHandler != nil {
 			chain, err := c.ChainHandler(e, req.Args)
 			if err != nil {
@@ -292,7 +321,7 @@ func (s *serviceServer) HandleFilter(_ context.Context, req *sdkv1.HandleFilterR
 		if f.Handler == nil {
 			return &sdkv1.HandleFilterResponse{Allow: true}, nil
 		}
-		return &sdkv1.HandleFilterResponse{Allow: f.Handler(e)}, nil
+		return &sdkv1.HandleFilterResponse{Allow: f.Handler(e), Result: eventResult(true, false)}, nil
 	}
 	return &sdkv1.HandleFilterResponse{Allow: true}, nil
 }
@@ -312,6 +341,13 @@ func decodePayload(b []byte, out any) {
 // payload; generic hooks just run.
 func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookRequest) (*sdkv1.HookResponse, error) {
 	resp := &sdkv1.HookResponse{Handled: false}
+	// markHandled flags "a handler produced a result" on both the legacy
+	// `handled` field and the new EventResult sub-message (stop mirrors the
+	// legacy `stop` field). Must be called AFTER resp.Stop is finalized.
+	markHandled := func() {
+		resp.Handled = true
+		resp.Result = eventResult(true, resp.Stop)
+	}
 	if s.impl == nil {
 		return resp, nil
 	}
@@ -346,7 +382,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		}
 		resp.ChainJson = chainJSON
 		resp.Stop = h.Stop
-		resp.Handled = true
+		markHandled()
 		return resp, nil
 	}
 
@@ -363,7 +399,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if err := h.Handler(e, pl); err != nil {
 			return nil, err
 		}
-		resp.Handled = true
+		markHandled()
 		return resp, nil
 	}
 
@@ -380,7 +416,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if err := h.Handler(e, call); err != nil {
 			return nil, err
 		}
-		resp.Handled = true
+		markHandled()
 		return resp, nil
 	}
 
@@ -397,7 +433,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if err := h.Handler(e, call); err != nil {
 			return nil, err
 		}
-		resp.Handled = true
+		markHandled()
 		return resp, nil
 	}
 
@@ -414,7 +450,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if err := h.Handler(e, pe); err != nil {
 			return nil, err
 		}
-		resp.Handled = true
+		markHandled()
 		return resp, nil
 	}
 
@@ -430,7 +466,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if err := h.Handler(name); err != nil {
 			return nil, err
 		}
-		resp.Handled = true
+		markHandled()
 		return resp, nil
 	}
 	for _, h := range s.impl.PluginLoadedHooks {
@@ -443,7 +479,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if err := h.Handler(payloadString(req.PayloadJson)); err != nil {
 			return nil, err
 		}
-		resp.Handled = true
+		markHandled()
 		return resp, nil
 	}
 	for _, h := range s.impl.PluginUnloadedHooks {
@@ -456,7 +492,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if err := h.Handler(payloadString(req.PayloadJson)); err != nil {
 			return nil, err
 		}
-		resp.Handled = true
+		markHandled()
 		return resp, nil
 	}
 	for _, h := range s.impl.AstrbotLoadedHooks {
@@ -469,7 +505,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if err := h.Handler(); err != nil {
 			return nil, err
 		}
-		resp.Handled = true
+		markHandled()
 		return resp, nil
 	}
 
@@ -484,7 +520,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if err := h.Handler(e); err != nil {
 			return nil, err
 		}
-		resp.Handled = true
+		markHandled()
 		return resp, nil
 	}
 	for _, h := range s.impl.AgentDoneHooks {
@@ -499,7 +535,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if err := h.Handler(e, pl); err != nil {
 			return nil, err
 		}
-		resp.Handled = true
+		markHandled()
 		return resp, nil
 	}
 
@@ -514,7 +550,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if err := h.Handler(e); err != nil {
 			return nil, err
 		}
-		resp.Handled = true
+		markHandled()
 		return resp, nil
 	}
 
@@ -529,7 +565,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if err := h.Handler(e); err != nil {
 			return nil, err
 		}
-		resp.Handled = true
+		markHandled()
 		return resp, nil
 	}
 	for _, h := range s.impl.WaitingLLMRequestHooks {
@@ -542,7 +578,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if err := h.Handler(e); err != nil {
 			return nil, err
 		}
-		resp.Handled = true
+		markHandled()
 		return resp, nil
 	}
 
@@ -556,7 +592,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if err := h.Handler(e); err != nil {
 			return nil, err
 		}
-		resp.Handled = true
+		markHandled()
 		return resp, nil
 	}
 	return resp, nil
@@ -613,6 +649,7 @@ func (s *serviceServer) HandleLLMRequest(_ context.Context, req *sdkv1.HandleLLM
 			resp.SystemPrompt = pr.SystemPrompt
 			resp.Stop = pr.Stop
 		}
+		resp.Result = eventResult(true, resp.Stop)
 		return resp, nil
 	}
 	return resp, nil
@@ -630,6 +667,7 @@ func (s *serviceServer) HandleTool(_ context.Context, req *sdkv1.HandleToolReque
 		if err := json.Unmarshal(req.ArgsJson, &args); err != nil {
 			resp.Text = "工具参数解析失败: " + err.Error()
 			resp.IsError = true
+			resp.Result = eventResult(true, false)
 			return resp, nil
 		}
 	}
@@ -644,9 +682,11 @@ func (s *serviceServer) HandleTool(_ context.Context, req *sdkv1.HandleToolReque
 		if err != nil {
 			resp.Text = "工具 " + t.Name + " 执行失败: " + err.Error()
 			resp.IsError = true
+			resp.Result = eventResult(true, false)
 			return resp, nil
 		}
 		resp.Text = text
+		resp.Result = eventResult(true, false)
 		return resp, nil
 	}
 	resp.Text = "工具 " + req.Name + " 未找到"
@@ -661,6 +701,28 @@ func (s *serviceServer) HealthCheck(context.Context, *sdkv1.Empty) (*sdkv1.Healt
 		resp.Version = s.impl.Version
 	}
 	return resp, nil
+}
+
+// SetLogLevel adjusts the plugin's logger level at runtime. The plugin's
+// hclog logger (created in Serve) is tuned so DEBUG/INFO/WARNING/ERROR lines
+// filter accordingly; "" (or an unknown name) falls back to Info, mirroring
+// the host's global level. CRITICAL (an AstrBot level hclog lacks) maps to
+// Error, the most restrictive hclog level.
+func (s *serviceServer) SetLogLevel(_ context.Context, req *sdkv1.SetLogLevelRequest) (*sdkv1.Empty, error) {
+	name := strings.ToUpper(strings.TrimSpace(req.Level))
+	if name == "CRITICAL" {
+		name = "ERROR"
+	}
+	lvl := hclog.LevelFromString(name)
+	if lvl == hclog.NoLevel {
+		lvl = hclog.Info
+	}
+	logMu.Lock()
+	if serviceLogger != nil {
+		serviceLogger.SetLevel(lvl)
+	}
+	logMu.Unlock()
+	return &sdkv1.Empty{}, nil
 }
 
 // webRoutePattern converts a plugin route like "/emoji/<category>" into a

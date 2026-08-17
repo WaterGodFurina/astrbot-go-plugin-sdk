@@ -17,6 +17,15 @@
 // AppID never collides with go-plugin's auto-incrementing NextId() stream
 // (which starts low and is only used when a plugin implementation opts into
 // the broker itself).
+//
+// EventResult is the extension point for handler outcomes: instead of piling
+// more ad-hoc bool fields onto every response message, future semantics
+// (blocked/consumed/etc.) are added as EventResult fields. Old plugin binaries
+// (compiled against a proto without `result`) leave the field unset; hosts
+// then fall back to the legacy bool fields (stop/sent/handled) that are kept
+// for that exact reason. New plugin binaries fill BOTH the result sub-message
+// and the legacy fields so old hosts keep working. Proto3 forward/backward
+// compatibility rule: only append fields, never remove/reorder/rename.
 syntax = "proto3";
 
 package astrbot.sdk.v1;
@@ -41,11 +50,22 @@ service PluginService {
   rpc HandleLLMRequest(HandleLLMRequestRequest) returns (HandleLLMRequestResponse);
   // HandleTool invokes a registered LLM function tool.
   rpc HandleTool(HandleToolRequest) returns (HandleToolResponse);
+  // ListTools returns the plugin's CURRENT LLM function tools. Plugin tools are
+  // typically registered during instantiation (Context.add_llm_tools in
+  // __init__/initialize), which happens AFTER Register — so the host pulls the
+  // live tool list through this RPC instead of relying on the Register
+  // snapshot (aligned with Python AstrBot's runtime tool collection).
+  rpc ListTools(Empty) returns (ListToolsResponse);
   // HandleWebRequest dispatches a dashboard HTTP request to a plugin-registered
   // Web API (context.register_web_api / /api/plug/<path>).
   rpc HandleWebRequest(HandleWebRequestRequest) returns (HandleWebRequestResponse);
   // HealthCheck is used for keep-alive/readiness probing.
   rpc HealthCheck(Empty) returns (HealthResponse);
+  // SetLogLevel adjusts the plugin's log level at runtime: the host's
+  // per-plugin override (DEBUG/INFO/WARNING/ERROR/CRITICAL), or "" to
+  // follow the host's global level. Old plugin binaries (compiled against
+  // a proto without this RPC) return UNIMPLEMENTED; the host tolerates it.
+  rpc SetLogLevel(SetLogLevelRequest) returns (Empty);
   // Cleanup is called when the host unloads the plugin.
   rpc Cleanup(Empty) returns (Empty);
 }
@@ -72,6 +92,25 @@ service HostService {
 }
 
 message Empty {}
+
+// EventResult aggregates the handler-outcome flags that used to be scattered
+// bool fields on individual response messages (sent / stop / handled). It is
+// the forward extension point: future semantics (blocked, consumed, ...) are
+// added here instead of as more top-level bools. `skip_llm` is reserved for
+// "do not invoke the LLM" (conceptually distinct from stop_propagation) and
+// is currently only passed through — hosts that do not consume it ignore it.
+message EventResult {
+  // handler 产生了结果（例如回复链/文本/拒绝动作已产生）。
+  bool handled = 1;
+  // sent: the plugin performed a send operation during the handler
+  // (Python _has_send_oper semantics). The host must not fall through to the
+  // LLM when a reply was already produced this way.
+  bool sent = 2;
+  // stop_propagation: stop the pipeline from continuing (legacy `stop`).
+  bool stop_propagation = 3;
+  // skip_llm: reserved concept — skip the LLM call for this message.
+  bool skip_llm = 4;
+}
 
 // CommandDesc describes a command the plugin accepts.
 message CommandDesc {
@@ -102,6 +141,12 @@ message ToolDesc {
 }
 
 message RegisterRequest {}
+
+// SetLogLevelRequest carries the desired log level name
+// (DEBUG/INFO/WARNING/ERROR/CRITICAL) or "" to follow the host's global level.
+message SetLogLevelRequest {
+  string level = 1;
+}
 
 message RegisterResponse {
   string name = 1;
@@ -171,6 +216,13 @@ message HandleCommandResponse {
   // JSON of []sdk.Component (optional richer result chain).
   bytes chain_json = 2;
   bool stop = 3;
+  // sent: the plugin performed a send operation during the handler (Python
+  // AstrBot _has_send_oper semantics). The host must not fall through to the
+  // LLM when the command already produced a reply this way.
+  bool sent = 4;
+  // EventResult aggregates the outcome flags; hosts read from `result` and
+  // fall back to the legacy fields above when it is absent (old binaries).
+  EventResult result = 5;
 }
 
 message HandleFilterRequest {
@@ -181,6 +233,10 @@ message HandleFilterRequest {
 
 message HandleFilterResponse {
   bool allow = 1;
+  // sent: the plugin sent a message while running the filter.
+  bool sent = 2;
+  // EventResult aggregates the outcome flags (legacy fallback: sent).
+  EventResult result = 3;
 }
 
 message HandleHookRequest {
@@ -203,6 +259,10 @@ message HookResponse {
   bytes chain_json = 1;
   bool stop = 2;
   bool handled = 3;
+  // sent: the plugin sent a message while running the hook.
+  bool sent = 4;
+  // EventResult aggregates the outcome flags (legacy fallback: stop/handled/sent).
+  EventResult result = 5;
 }
 
 message HandleLLMRequestRequest {
@@ -220,6 +280,10 @@ message HandleLLMRequestResponse {
   string system_prompt = 1;
   // Stop: do not call the LLM for this message.
   bool stop = 2;
+  // sent: the plugin sent a message while running the hook.
+  bool sent = 3;
+  // EventResult aggregates the outcome flags (legacy fallback: stop/sent).
+  EventResult result = 4;
 }
 
 message HandleToolRequest {
@@ -234,6 +298,14 @@ message HandleToolResponse {
   // Text result fed back to the model as the tool message.
   string text = 1;
   bool is_error = 2;
+  // sent: the plugin sent a message while running the tool.
+  bool sent = 3;
+  // EventResult aggregates the outcome flags (legacy fallback: sent).
+  EventResult result = 4;
+}
+
+message ListToolsResponse {
+  repeated ToolDesc tools = 1;
 }
 
 message HealthResponse {
