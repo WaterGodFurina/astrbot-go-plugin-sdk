@@ -66,23 +66,25 @@ func ImageFile(path string) Component { return Component{Type: CompImage, Path: 
 // Event is a lightweight, serializable view of an incoming message event.
 // It is the plugin-facing equivalent of the host's core.Event.
 type Event struct {
-	Type       string         `json:"type"`
-	Platform   string         `json:"platform"`
-	SelfID     string         `json:"self_id,omitempty"`
-	SenderID   string         `json:"sender_id"`
-	SenderName string         `json:"sender_name"`
-	ConvID     string         `json:"conv_id"`
-	GroupName  string         `json:"group_name,omitempty"`
-	IsGroup    bool           `json:"is_group"`
-	IsAtBot    bool           `json:"is_at_bot"`
-	IsAdmin    bool           `json:"is_admin"`
-	MessageStr string         `json:"message_str"`
-	PlainText  string         `json:"plain_text"`
-	RawMessage string         `json:"raw_message,omitempty"`
-	MessageID  string         `json:"message_id,omitempty"`
-	Timestamp  int64          `json:"timestamp"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
-	Chain      []Component    `json:"chain,omitempty"`
+	Type        string         `json:"type"`
+	Platform    string         `json:"platform"`
+	PlatformID  string         `json:"platform_id,omitempty"`
+	MessageType string         `json:"message_type,omitempty"`
+	SelfID      string         `json:"self_id,omitempty"`
+	SenderID    string         `json:"sender_id"`
+	SenderName  string         `json:"sender_name"`
+	ConvID      string         `json:"conv_id"`
+	GroupName   string         `json:"group_name,omitempty"`
+	IsGroup     bool           `json:"is_group"`
+	IsAtBot     bool           `json:"is_at_bot"`
+	IsAdmin     bool           `json:"is_admin"`
+	MessageStr  string         `json:"message_str"`
+	PlainText   string         `json:"plain_text"`
+	RawMessage  string         `json:"raw_message,omitempty"`
+	MessageID   string         `json:"message_id,omitempty"`
+	Timestamp   int64          `json:"timestamp"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	Chain       []Component    `json:"chain,omitempty"`
 }
 
 // GetSenderID returns the sender's user ID.
@@ -106,6 +108,27 @@ func (e *Event) IsGroupMessage() bool { return e != nil && e.IsGroup }
 
 // IsAdminUser reports whether the sender is an admin.
 func (e *Event) IsAdminUser() bool { return e != nil && e.IsAdmin }
+
+// GetPlatformID returns the platform instance ID (adapter id), falling back to
+// the platform type name when the instance ID is unavailable.
+func (e *Event) GetPlatformID() string {
+	if e == nil {
+		return ""
+	}
+	if e.PlatformID != "" {
+		return e.PlatformID
+	}
+	return e.Platform
+}
+
+// GetMessageType returns the camel-case message type
+// ("GroupMessage"/"FriendMessage"/"OtherMessage").
+func (e *Event) GetMessageType() string {
+	if e == nil {
+		return ""
+	}
+	return e.MessageType
+}
 
 // GetMessageStr returns the raw message text.
 func (e *Event) GetMessageStr() string {
