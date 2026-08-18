@@ -655,6 +655,28 @@ func (s *serviceServer) HandleLLMRequest(_ context.Context, req *sdkv1.HandleLLM
 	return resp, nil
 }
 
+// ListTools returns the plugin's current LLM function tools. Plugin tools are
+// registered during instantiation (after Register), so this is pulled live on
+// each call instead of being captured in the Register snapshot.
+func (s *serviceServer) ListTools(context.Context, *sdkv1.Empty) (*sdkv1.ListToolsResponse, error) {
+	resp := &sdkv1.ListToolsResponse{}
+	if s.impl == nil {
+		return resp, nil
+	}
+	for _, t := range s.impl.Tools {
+		schema, err := json.Marshal(t.ParamsSchema)
+		if err != nil {
+			schema = []byte("{}")
+		}
+		resp.Tools = append(resp.Tools, &sdkv1.ToolDesc{
+			Name:        t.Name,
+			Description: t.Description,
+			ParamsJson:  schema,
+		})
+	}
+	return resp, nil
+}
+
 // HandleTool invokes a registered LLM function tool.
 func (s *serviceServer) HandleTool(_ context.Context, req *sdkv1.HandleToolRequest) (*sdkv1.HandleToolResponse, error) {
 	resp := &sdkv1.HandleToolResponse{}
