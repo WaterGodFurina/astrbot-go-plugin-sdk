@@ -66,6 +66,11 @@ service PluginService {
   // follow the host's global level. Old plugin binaries (compiled against
   // a proto without this RPC) return UNIMPLEMENTED; the host tolerates it.
   rpc SetLogLevel(SetLogLevelRequest) returns (Empty);
+  // FeedSessionWait pushes an inbound message event to a plugin that
+  // registered a session wait (session_waiter). Triggered by the host when
+  // a message arrives for a waiting umo. The plugin feeds it into
+  // SessionWaiter.trigger; if no wait matches it returns handled=false.
+  rpc FeedSessionWait(FeedSessionWaitRequest) returns (FeedSessionWaitResponse);
   // Cleanup is called when the host unloads the plugin.
   rpc Cleanup(Empty) returns (Empty);
 }
@@ -137,8 +142,15 @@ service HostService {
   rpc SetPluginEnabled(SetPluginEnabledRequest) returns (Empty);
   // 安装插件（git/url 源）。
   rpc InstallPlugin(InstallPluginRequest) returns (Empty);
-  // 卸载插件。
+  // UninstallPlugin 卸载插件。
   rpc UninstallPlugin(UninstallPluginRequest) returns (Empty);
+
+  // ── 会话等待（SessionWaiter 跨进程喂入）──
+  // 插件注册"等待某 umo 的下一条消息"（session_waiter.register_wait）。
+  // 宿主收到该 umo 的消息时经 PluginService.FeedSessionWait 推送事件。
+  rpc RegisterSessionWait(RegisterSessionWaitRequest) returns (RegisterSessionWaitResponse);
+  // 插件注销等待（会话结束/超时）。
+  rpc UnregisterSessionWait(UnregisterSessionWaitRequest) returns (Empty);
 }
 
 message Empty {}
@@ -631,4 +643,32 @@ message InstallPluginRequest {
 
 message UninstallPluginRequest {
   string plugin_name = 1;
+}
+
+// --- Session wait payloads --------------------------------------------------
+
+message RegisterSessionWaitRequest {
+  // Unified message origin the plugin waits on (e.g. "aiocqhttp:GroupMessage:123").
+  string umo = 1;
+  // Timeout seconds after which the wait expires (host does not push events).
+  int32 timeout_seconds = 2;
+}
+
+message RegisterSessionWaitResponse {
+  // Host-assigned wait id, used by UnregisterSessionWait.
+  string wait_id = 1;
+}
+
+message UnregisterSessionWaitRequest {
+  string wait_id = 1;
+}
+
+message FeedSessionWaitRequest {
+  // JSON of sdk.Event (same encoding as HandleFilter's event_json).
+  bytes event_json = 1;
+}
+
+message FeedSessionWaitResponse {
+  // Whether a registered wait consumed this event.
+  bool handled = 1;
 }

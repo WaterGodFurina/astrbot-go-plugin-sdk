@@ -233,6 +233,18 @@ func (c *Client) SetLogLevel(ctx context.Context, level string) error {
 	return err
 }
 
+// FeedSessionWait pushes an inbound event to the plugin so a registered
+// session wait (session_waiter) can consume it. Returns handled=true when a
+// wait consumed the event. Old plugin binaries return UNIMPLEMENTED; the
+// caller should treat that as handled=false (no wait registered).
+func (c *Client) FeedSessionWait(ctx context.Context, eventJSON []byte) (bool, error) {
+	resp, err := c.svc.FeedSessionWait(ctx, &sdkv1.FeedSessionWaitRequest{EventJson: eventJSON}, rpcCallOpts...)
+	if err != nil {
+		return false, err
+	}
+	return resp.GetHandled(), nil
+}
+
 // Close releases the underlying gRPC connection and stops the HostService
 // server this client served on the broker (if any). Call it after the plugin
 // process has been killed so reloads do not leak connections/goroutines.

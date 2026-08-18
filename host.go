@@ -325,6 +325,14 @@ type HostServiceHooks struct {
 	InstallPlugin func(repo string) error
 	// UninstallPlugin 卸载插件。
 	UninstallPlugin func(pluginName string) error
+
+	// ── 会话等待（SessionWaiter）──
+	// RegisterSessionWait 注册插件对 umo 的等待，返回 wait_id（空 = 不支持）。
+	// pluginName 由 SDK 侧从连接身份（s.pluginID）自动注入，宿主据此记录等待
+	// 归属插件（proto 未携带插件名字段，避免改协议）。
+	RegisterSessionWait func(pluginName, umo string, timeoutSeconds int32) string
+	// UnregisterSessionWait 注销等待。
+	UnregisterSessionWait func(waitID string)
 }
 
 var (
@@ -809,6 +817,29 @@ func (s *hostServiceServer) UninstallPlugin(_ context.Context, req *sdkv1.Uninst
 	if err := h.UninstallPlugin(req.PluginName); err != nil {
 		return nil, err
 	}
+	return &sdkv1.Empty{}, nil
+}
+
+// RegisterSessionWait registers a session wait for this plugin (the host
+// feeds matching inbound events back via PluginService.FeedSessionWait).
+// pluginName 从连接身份注入（s.pluginID，Register 后为注册名），宿主凭此
+// 关联等待与插件实例。
+func (s *hostServiceServer) RegisterSessionWait(_ context.Context, req *sdkv1.RegisterSessionWaitRequest) (*sdkv1.RegisterSessionWaitResponse, error) {
+	h := getHostHooks()
+	if h.RegisterSessionWait == nil {
+		return &sdkv1.RegisterSessionWaitResponse{}, nil
+	}
+	waitID := h.RegisterSessionWait(s.pluginID, req.Umo, req.TimeoutSeconds)
+	return &sdkv1.RegisterSessionWaitResponse{WaitId: waitID}, nil
+}
+
+// UnregisterSessionWait removes a previously registered session wait.
+func (s *hostServiceServer) UnregisterSessionWait(_ context.Context, req *sdkv1.UnregisterSessionWaitRequest) (*sdkv1.Empty, error) {
+	h := getHostHooks()
+	if h.UnregisterSessionWait == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	h.UnregisterSessionWait(req.WaitId)
 	return &sdkv1.Empty{}, nil
 }
 

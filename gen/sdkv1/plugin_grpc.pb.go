@@ -58,6 +58,7 @@ const (
 	PluginService_HandleWebRequest_FullMethodName = "/astrbot.sdk.v1.PluginService/HandleWebRequest"
 	PluginService_HealthCheck_FullMethodName      = "/astrbot.sdk.v1.PluginService/HealthCheck"
 	PluginService_SetLogLevel_FullMethodName      = "/astrbot.sdk.v1.PluginService/SetLogLevel"
+	PluginService_FeedSessionWait_FullMethodName  = "/astrbot.sdk.v1.PluginService/FeedSessionWait"
 	PluginService_Cleanup_FullMethodName          = "/astrbot.sdk.v1.PluginService/Cleanup"
 )
 
@@ -99,6 +100,11 @@ type PluginServiceClient interface {
 	// follow the host's global level. Old plugin binaries (compiled against
 	// a proto without this RPC) return UNIMPLEMENTED; the host tolerates it.
 	SetLogLevel(ctx context.Context, in *SetLogLevelRequest, opts ...grpc.CallOption) (*Empty, error)
+	// FeedSessionWait pushes an inbound message event to a plugin that
+	// registered a session wait (session_waiter). Triggered by the host when
+	// a message arrives for a waiting umo. The plugin feeds it into
+	// SessionWaiter.trigger; if no wait matches it returns handled=false.
+	FeedSessionWait(ctx context.Context, in *FeedSessionWaitRequest, opts ...grpc.CallOption) (*FeedSessionWaitResponse, error)
 	// Cleanup is called when the host unloads the plugin.
 	Cleanup(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
 }
@@ -211,6 +217,16 @@ func (c *pluginServiceClient) SetLogLevel(ctx context.Context, in *SetLogLevelRe
 	return out, nil
 }
 
+func (c *pluginServiceClient) FeedSessionWait(ctx context.Context, in *FeedSessionWaitRequest, opts ...grpc.CallOption) (*FeedSessionWaitResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FeedSessionWaitResponse)
+	err := c.cc.Invoke(ctx, PluginService_FeedSessionWait_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *pluginServiceClient) Cleanup(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Empty)
@@ -259,6 +275,11 @@ type PluginServiceServer interface {
 	// follow the host's global level. Old plugin binaries (compiled against
 	// a proto without this RPC) return UNIMPLEMENTED; the host tolerates it.
 	SetLogLevel(context.Context, *SetLogLevelRequest) (*Empty, error)
+	// FeedSessionWait pushes an inbound message event to a plugin that
+	// registered a session wait (session_waiter). Triggered by the host when
+	// a message arrives for a waiting umo. The plugin feeds it into
+	// SessionWaiter.trigger; if no wait matches it returns handled=false.
+	FeedSessionWait(context.Context, *FeedSessionWaitRequest) (*FeedSessionWaitResponse, error)
 	// Cleanup is called when the host unloads the plugin.
 	Cleanup(context.Context, *Empty) (*Empty, error)
 	mustEmbedUnimplementedPluginServiceServer()
@@ -300,6 +321,9 @@ func (UnimplementedPluginServiceServer) HealthCheck(context.Context, *Empty) (*H
 }
 func (UnimplementedPluginServiceServer) SetLogLevel(context.Context, *SetLogLevelRequest) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetLogLevel not implemented")
+}
+func (UnimplementedPluginServiceServer) FeedSessionWait(context.Context, *FeedSessionWaitRequest) (*FeedSessionWaitResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FeedSessionWait not implemented")
 }
 func (UnimplementedPluginServiceServer) Cleanup(context.Context, *Empty) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Cleanup not implemented")
@@ -505,6 +529,24 @@ func _PluginService_SetLogLevel_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PluginService_FeedSessionWait_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FeedSessionWaitRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).FeedSessionWait(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_FeedSessionWait_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).FeedSessionWait(ctx, req.(*FeedSessionWaitRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _PluginService_Cleanup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(Empty)
 	if err := dec(in); err != nil {
@@ -571,6 +613,10 @@ var PluginService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _PluginService_SetLogLevel_Handler,
 		},
 		{
+			MethodName: "FeedSessionWait",
+			Handler:    _PluginService_FeedSessionWait_Handler,
+		},
+		{
 			MethodName: "Cleanup",
 			Handler:    _PluginService_Cleanup_Handler,
 		},
@@ -609,6 +655,8 @@ const (
 	HostService_SetPluginEnabled_FullMethodName            = "/astrbot.sdk.v1.HostService/SetPluginEnabled"
 	HostService_InstallPlugin_FullMethodName               = "/astrbot.sdk.v1.HostService/InstallPlugin"
 	HostService_UninstallPlugin_FullMethodName             = "/astrbot.sdk.v1.HostService/UninstallPlugin"
+	HostService_RegisterSessionWait_FullMethodName         = "/astrbot.sdk.v1.HostService/RegisterSessionWait"
+	HostService_UnregisterSessionWait_FullMethodName       = "/astrbot.sdk.v1.HostService/UnregisterSessionWait"
 )
 
 // HostServiceClient is the client API for HostService service.
@@ -678,8 +726,14 @@ type HostServiceClient interface {
 	SetPluginEnabled(ctx context.Context, in *SetPluginEnabledRequest, opts ...grpc.CallOption) (*Empty, error)
 	// 安装插件（git/url 源）。
 	InstallPlugin(ctx context.Context, in *InstallPluginRequest, opts ...grpc.CallOption) (*Empty, error)
-	// 卸载插件。
+	// UninstallPlugin 卸载插件。
 	UninstallPlugin(ctx context.Context, in *UninstallPluginRequest, opts ...grpc.CallOption) (*Empty, error)
+	// ── 会话等待（SessionWaiter 跨进程喂入）──
+	// 插件注册"等待某 umo 的下一条消息"（session_waiter.register_wait）。
+	// 宿主收到该 umo 的消息时经 PluginService.FeedSessionWait 推送事件。
+	RegisterSessionWait(ctx context.Context, in *RegisterSessionWaitRequest, opts ...grpc.CallOption) (*RegisterSessionWaitResponse, error)
+	// 插件注销等待（会话结束/超时）。
+	UnregisterSessionWait(ctx context.Context, in *UnregisterSessionWaitRequest, opts ...grpc.CallOption) (*Empty, error)
 }
 
 type hostServiceClient struct {
@@ -980,6 +1034,26 @@ func (c *hostServiceClient) UninstallPlugin(ctx context.Context, in *UninstallPl
 	return out, nil
 }
 
+func (c *hostServiceClient) RegisterSessionWait(ctx context.Context, in *RegisterSessionWaitRequest, opts ...grpc.CallOption) (*RegisterSessionWaitResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RegisterSessionWaitResponse)
+	err := c.cc.Invoke(ctx, HostService_RegisterSessionWait_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) UnregisterSessionWait(ctx context.Context, in *UnregisterSessionWaitRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_UnregisterSessionWait_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // HostServiceServer is the server API for HostService service.
 // All implementations must embed UnimplementedHostServiceServer
 // for forward compatibility.
@@ -1047,8 +1121,14 @@ type HostServiceServer interface {
 	SetPluginEnabled(context.Context, *SetPluginEnabledRequest) (*Empty, error)
 	// 安装插件（git/url 源）。
 	InstallPlugin(context.Context, *InstallPluginRequest) (*Empty, error)
-	// 卸载插件。
+	// UninstallPlugin 卸载插件。
 	UninstallPlugin(context.Context, *UninstallPluginRequest) (*Empty, error)
+	// ── 会话等待（SessionWaiter 跨进程喂入）──
+	// 插件注册"等待某 umo 的下一条消息"（session_waiter.register_wait）。
+	// 宿主收到该 umo 的消息时经 PluginService.FeedSessionWait 推送事件。
+	RegisterSessionWait(context.Context, *RegisterSessionWaitRequest) (*RegisterSessionWaitResponse, error)
+	// 插件注销等待（会话结束/超时）。
+	UnregisterSessionWait(context.Context, *UnregisterSessionWaitRequest) (*Empty, error)
 	mustEmbedUnimplementedHostServiceServer()
 }
 
@@ -1145,6 +1225,12 @@ func (UnimplementedHostServiceServer) InstallPlugin(context.Context, *InstallPlu
 }
 func (UnimplementedHostServiceServer) UninstallPlugin(context.Context, *UninstallPluginRequest) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method UninstallPlugin not implemented")
+}
+func (UnimplementedHostServiceServer) RegisterSessionWait(context.Context, *RegisterSessionWaitRequest) (*RegisterSessionWaitResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RegisterSessionWait not implemented")
+}
+func (UnimplementedHostServiceServer) UnregisterSessionWait(context.Context, *UnregisterSessionWaitRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UnregisterSessionWait not implemented")
 }
 func (UnimplementedHostServiceServer) mustEmbedUnimplementedHostServiceServer() {}
 func (UnimplementedHostServiceServer) testEmbeddedByValue()                     {}
@@ -1689,6 +1775,42 @@ func _HostService_UninstallPlugin_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HostService_RegisterSessionWait_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterSessionWaitRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).RegisterSessionWait(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_RegisterSessionWait_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).RegisterSessionWait(ctx, req.(*RegisterSessionWaitRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_UnregisterSessionWait_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnregisterSessionWaitRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).UnregisterSessionWait(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_UnregisterSessionWait_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).UnregisterSessionWait(ctx, req.(*UnregisterSessionWaitRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // HostService_ServiceDesc is the grpc.ServiceDesc for HostService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1811,6 +1933,14 @@ var HostService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UninstallPlugin",
 			Handler:    _HostService_UninstallPlugin_Handler,
+		},
+		{
+			MethodName: "RegisterSessionWait",
+			Handler:    _HostService_RegisterSessionWait_Handler,
+		},
+		{
+			MethodName: "UnregisterSessionWait",
+			Handler:    _HostService_UnregisterSessionWait_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
