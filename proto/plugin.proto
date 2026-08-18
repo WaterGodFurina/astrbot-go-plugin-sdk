@@ -89,6 +89,56 @@ service HostService {
   // TextToImage renders text into an image (host t2i engine) and returns the
   // PNG bytes (base64). The plugin can then send it as an Image component.
   rpc TextToImage(TextToImageRequest) returns (TextToImageResponse);
+
+  // ── 会话管理（对齐 Python AstrBot conversation_manager）──
+  // 取会话当前 ID（umo 无会话时返回空串）。
+  rpc GetCurrConversationID(ConversationIDRequest) returns (ConversationIDResponse);
+  // 新建会话（设为当前）并返回其 ID。
+  rpc NewConversation(NewConversationRequest) returns (ConversationIDResponse);
+  // 按 umo+cid 取会话（create_if_not_exists 时不存在则新建）。
+  rpc GetConversation(GetConversationRequest) returns (ConversationResponse);
+  // 列出某 umo 的全部会话（无 umo 时列出全部）。
+  rpc GetConversations(GetConversationsRequest) returns (ConversationsResponse);
+  // 删除会话（按 umo+cid；cid 空时删除当前会话）。
+  rpc DeleteConversation(DeleteConversationRequest) returns (Empty);
+  // 切换当前会话（设置 umo 的 current cid）。
+  rpc SwitchConversation(SwitchConversationRequest) returns (Empty);
+  // 更新会话标题。
+  rpc UpdateConversationTitle(UpdateConversationTitleRequest) returns (Empty);
+  // 更新会话绑定的人格。
+  rpc UpdateConversationPersonaID(UpdateConversationPersonaRequest) returns (Empty);
+
+  // ── 人格管理（对齐 Python AstrBot persona_manager）──
+  // 取全部人格。
+  rpc GetPersonas(Empty) returns (PersonasResponse);
+  // 取默认人格（按 umo 解析默认人格 id/name）。
+  rpc GetDefaultPersona(GetDefaultPersonaRequest) returns (PersonaResponse);
+  // 取文件夹树（嵌套结构）+ 全部人格。
+  rpc GetPersonaTree(Empty) returns (PersonaTreeResponse);
+  // 解析当前生效人格（会话/规则/默认的优先级合并）。
+  rpc ResolveSelectedPersona(ResolvePersonaRequest) returns (ResolvePersonaResponse);
+
+  // ── Provider 管理（对齐 Python AstrBot provider_manager）──
+  // 列出全部 provider（按能力类型过滤，空=全部）。
+  rpc ListProviders(ListProvidersRequest) returns (ProvidersResponse);
+  // 取某 umo 当前使用的 provider（按能力类型）。
+  rpc GetUsingProvider(GetUsingProviderRequest) returns (ProviderResponse);
+  // 设置某 umo 的当前 provider。
+  rpc SetProvider(SetProviderRequest) returns (Empty);
+  // 取 provider 的模型列表。
+  rpc GetProviderModels(GetProviderModelsRequest) returns (ProviderModelsResponse);
+
+  // ── 插件/Star 管理（对齐 Python AstrBot star_manager）──
+  // 列出全部已安装插件（Star 元数据）。
+  rpc ListStars(Empty) returns (StarsResponse);
+  // 按插件名取 Star 元数据。
+  rpc GetStar(GetStarRequest) returns (StarResponse);
+  // 启用/禁用插件。
+  rpc SetPluginEnabled(SetPluginEnabledRequest) returns (Empty);
+  // 安装插件（git/url 源）。
+  rpc InstallPlugin(InstallPluginRequest) returns (Empty);
+  // 卸载插件。
+  rpc UninstallPlugin(UninstallPluginRequest) returns (Empty);
 }
 
 message Empty {}
@@ -402,4 +452,183 @@ message TextToImageRequest {
 message TextToImageResponse {
   // PNG image bytes, base64-encoded (no data: prefix).
   string image_base64 = 1;
+}
+
+// --- Conversation management payloads ---------------------------------------
+
+message ConversationIDRequest {
+  string unified_msg_origin = 1;
+}
+
+message ConversationIDResponse {
+  string cid = 1;
+}
+
+message NewConversationRequest {
+  string unified_msg_origin = 1;
+  string platform_id = 2;
+  string persona_id = 3;
+}
+
+message GetConversationRequest {
+  string unified_msg_origin = 1;
+  string conversation_id = 2;
+  bool create_if_not_exists = 3;
+}
+
+message ConversationResponse {
+  // JSON of the conversation (cid/title/persona_id/history/updated_at/...).
+  bytes conversation_json = 1;
+}
+
+message GetConversationsRequest {
+  string unified_msg_origin = 1; // empty = all
+}
+
+message ConversationsResponse {
+  repeated bytes conversations_json = 1; // JSON per conversation
+}
+
+message DeleteConversationRequest {
+  string unified_msg_origin = 1;
+  string conversation_id = 2; // empty = current
+}
+
+message SwitchConversationRequest {
+  string unified_msg_origin = 1;
+  string conversation_id = 2;
+}
+
+message UpdateConversationTitleRequest {
+  string unified_msg_origin = 1;
+  string conversation_id = 2; // empty = current
+  string title = 3;
+}
+
+message UpdateConversationPersonaRequest {
+  string unified_msg_origin = 1;
+  string conversation_id = 2; // empty = current
+  string persona_id = 3;
+}
+
+// --- Persona management payloads --------------------------------------------
+
+message PersonaPayload {
+  string id = 1;
+  string name = 2;
+  string prompt = 3;
+  bool is_default = 4;
+  string folder_id = 5;
+}
+
+message GetDefaultPersonaRequest {
+  string umo = 1;
+}
+
+message PersonaResponse {
+  bytes persona_json = 1; // JSON of PersonaPayload
+}
+
+message PersonasResponse {
+  repeated bytes personas_json = 1;
+}
+
+message PersonaTreeResponse {
+  repeated bytes folders_json = 1; // nested {name,folder_id,children}
+  repeated bytes personas_json = 2; // flat PersonaPayload list
+}
+
+message ResolvePersonaRequest {
+  string umo = 1;
+  string conversation_persona_id = 2;
+  string platform_name = 3;
+  bytes provider_settings_json = 4; // JSON of provider_settings map
+}
+
+message ResolvePersonaResponse {
+  string persona_id = 1;
+  string persona_name = 2;
+  string persona_prompt = 3;
+  string force_applied_persona_id = 4;
+  bool is_default = 5;
+}
+
+// --- Provider management payloads -------------------------------------------
+
+message ListProvidersRequest {
+  // capability filter: chat_completion | text_to_speech | speech_to_text |
+  // embedding | rerank. Empty = all.
+  string capability = 1;
+}
+
+message ProviderPayload {
+  string id = 1;
+  string model = 2;
+  string type = 3; // adapter name (openai, ollama, ...)
+  string provider_type = 4; // capability
+  string desc = 5;
+}
+
+message ProvidersResponse {
+  repeated bytes providers_json = 1; // JSON of ProviderPayload
+}
+
+message GetUsingProviderRequest {
+  string umo = 1;
+  string capability = 2; // empty = chat_completion
+}
+
+message ProviderResponse {
+  bytes provider_json = 1; // JSON of ProviderPayload
+}
+
+message SetProviderRequest {
+  string umo = 1;
+  string provider_id = 2;
+  string capability = 3; // empty = chat_completion
+}
+
+message GetProviderModelsRequest {
+  string provider_id = 1;
+}
+
+message ProviderModelsResponse {
+  repeated string models = 1;
+}
+
+// --- Plugin/Star management payloads ----------------------------------------
+
+message StarPayload {
+  string name = 1;
+  string author = 2;
+  string desc = 3;
+  string version = 4;
+  string module_path = 5;
+  bool activated = 6;
+  string repo = 7;
+}
+
+message GetStarRequest {
+  string name = 1;
+}
+
+message StarsResponse {
+  repeated bytes stars_json = 1; // JSON of StarPayload
+}
+
+message StarResponse {
+  bytes star_json = 1; // JSON of StarPayload
+}
+
+message SetPluginEnabledRequest {
+  string plugin_name = 1;
+  bool enabled = 2;
+}
+
+message InstallPluginRequest {
+  string repo = 1; // git url / plugin name
+}
+
+message UninstallPluginRequest {
+  string plugin_name = 1;
 }

@@ -580,14 +580,35 @@ var PluginService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	HostService_CallAction_FullMethodName    = "/astrbot.sdk.v1.HostService/CallAction"
-	HostService_SendMessage_FullMethodName   = "/astrbot.sdk.v1.HostService/SendMessage"
-	HostService_RecallMessage_FullMethodName = "/astrbot.sdk.v1.HostService/RecallMessage"
-	HostService_GetConfig_FullMethodName     = "/astrbot.sdk.v1.HostService/GetConfig"
-	HostService_SetConfig_FullMethodName     = "/astrbot.sdk.v1.HostService/SetConfig"
-	HostService_ChatLLM_FullMethodName       = "/astrbot.sdk.v1.HostService/ChatLLM"
-	HostService_React_FullMethodName         = "/astrbot.sdk.v1.HostService/React"
-	HostService_TextToImage_FullMethodName   = "/astrbot.sdk.v1.HostService/TextToImage"
+	HostService_CallAction_FullMethodName                  = "/astrbot.sdk.v1.HostService/CallAction"
+	HostService_SendMessage_FullMethodName                 = "/astrbot.sdk.v1.HostService/SendMessage"
+	HostService_RecallMessage_FullMethodName               = "/astrbot.sdk.v1.HostService/RecallMessage"
+	HostService_GetConfig_FullMethodName                   = "/astrbot.sdk.v1.HostService/GetConfig"
+	HostService_SetConfig_FullMethodName                   = "/astrbot.sdk.v1.HostService/SetConfig"
+	HostService_ChatLLM_FullMethodName                     = "/astrbot.sdk.v1.HostService/ChatLLM"
+	HostService_React_FullMethodName                       = "/astrbot.sdk.v1.HostService/React"
+	HostService_TextToImage_FullMethodName                 = "/astrbot.sdk.v1.HostService/TextToImage"
+	HostService_GetCurrConversationID_FullMethodName       = "/astrbot.sdk.v1.HostService/GetCurrConversationID"
+	HostService_NewConversation_FullMethodName             = "/astrbot.sdk.v1.HostService/NewConversation"
+	HostService_GetConversation_FullMethodName             = "/astrbot.sdk.v1.HostService/GetConversation"
+	HostService_GetConversations_FullMethodName            = "/astrbot.sdk.v1.HostService/GetConversations"
+	HostService_DeleteConversation_FullMethodName          = "/astrbot.sdk.v1.HostService/DeleteConversation"
+	HostService_SwitchConversation_FullMethodName          = "/astrbot.sdk.v1.HostService/SwitchConversation"
+	HostService_UpdateConversationTitle_FullMethodName     = "/astrbot.sdk.v1.HostService/UpdateConversationTitle"
+	HostService_UpdateConversationPersonaID_FullMethodName = "/astrbot.sdk.v1.HostService/UpdateConversationPersonaID"
+	HostService_GetPersonas_FullMethodName                 = "/astrbot.sdk.v1.HostService/GetPersonas"
+	HostService_GetDefaultPersona_FullMethodName           = "/astrbot.sdk.v1.HostService/GetDefaultPersona"
+	HostService_GetPersonaTree_FullMethodName              = "/astrbot.sdk.v1.HostService/GetPersonaTree"
+	HostService_ResolveSelectedPersona_FullMethodName      = "/astrbot.sdk.v1.HostService/ResolveSelectedPersona"
+	HostService_ListProviders_FullMethodName               = "/astrbot.sdk.v1.HostService/ListProviders"
+	HostService_GetUsingProvider_FullMethodName            = "/astrbot.sdk.v1.HostService/GetUsingProvider"
+	HostService_SetProvider_FullMethodName                 = "/astrbot.sdk.v1.HostService/SetProvider"
+	HostService_GetProviderModels_FullMethodName           = "/astrbot.sdk.v1.HostService/GetProviderModels"
+	HostService_ListStars_FullMethodName                   = "/astrbot.sdk.v1.HostService/ListStars"
+	HostService_GetStar_FullMethodName                     = "/astrbot.sdk.v1.HostService/GetStar"
+	HostService_SetPluginEnabled_FullMethodName            = "/astrbot.sdk.v1.HostService/SetPluginEnabled"
+	HostService_InstallPlugin_FullMethodName               = "/astrbot.sdk.v1.HostService/InstallPlugin"
+	HostService_UninstallPlugin_FullMethodName             = "/astrbot.sdk.v1.HostService/UninstallPlugin"
 )
 
 // HostServiceClient is the client API for HostService service.
@@ -613,6 +634,52 @@ type HostServiceClient interface {
 	// TextToImage renders text into an image (host t2i engine) and returns the
 	// PNG bytes (base64). The plugin can then send it as an Image component.
 	TextToImage(ctx context.Context, in *TextToImageRequest, opts ...grpc.CallOption) (*TextToImageResponse, error)
+	// ── 会话管理（对齐 Python AstrBot conversation_manager）──
+	// 取会话当前 ID（umo 无会话时返回空串）。
+	GetCurrConversationID(ctx context.Context, in *ConversationIDRequest, opts ...grpc.CallOption) (*ConversationIDResponse, error)
+	// 新建会话（设为当前）并返回其 ID。
+	NewConversation(ctx context.Context, in *NewConversationRequest, opts ...grpc.CallOption) (*ConversationIDResponse, error)
+	// 按 umo+cid 取会话（create_if_not_exists 时不存在则新建）。
+	GetConversation(ctx context.Context, in *GetConversationRequest, opts ...grpc.CallOption) (*ConversationResponse, error)
+	// 列出某 umo 的全部会话（无 umo 时列出全部）。
+	GetConversations(ctx context.Context, in *GetConversationsRequest, opts ...grpc.CallOption) (*ConversationsResponse, error)
+	// 删除会话（按 umo+cid；cid 空时删除当前会话）。
+	DeleteConversation(ctx context.Context, in *DeleteConversationRequest, opts ...grpc.CallOption) (*Empty, error)
+	// 切换当前会话（设置 umo 的 current cid）。
+	SwitchConversation(ctx context.Context, in *SwitchConversationRequest, opts ...grpc.CallOption) (*Empty, error)
+	// 更新会话标题。
+	UpdateConversationTitle(ctx context.Context, in *UpdateConversationTitleRequest, opts ...grpc.CallOption) (*Empty, error)
+	// 更新会话绑定的人格。
+	UpdateConversationPersonaID(ctx context.Context, in *UpdateConversationPersonaRequest, opts ...grpc.CallOption) (*Empty, error)
+	// ── 人格管理（对齐 Python AstrBot persona_manager）──
+	// 取全部人格。
+	GetPersonas(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*PersonasResponse, error)
+	// 取默认人格（按 umo 解析默认人格 id/name）。
+	GetDefaultPersona(ctx context.Context, in *GetDefaultPersonaRequest, opts ...grpc.CallOption) (*PersonaResponse, error)
+	// 取文件夹树（嵌套结构）+ 全部人格。
+	GetPersonaTree(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*PersonaTreeResponse, error)
+	// 解析当前生效人格（会话/规则/默认的优先级合并）。
+	ResolveSelectedPersona(ctx context.Context, in *ResolvePersonaRequest, opts ...grpc.CallOption) (*ResolvePersonaResponse, error)
+	// ── Provider 管理（对齐 Python AstrBot provider_manager）──
+	// 列出全部 provider（按能力类型过滤，空=全部）。
+	ListProviders(ctx context.Context, in *ListProvidersRequest, opts ...grpc.CallOption) (*ProvidersResponse, error)
+	// 取某 umo 当前使用的 provider（按能力类型）。
+	GetUsingProvider(ctx context.Context, in *GetUsingProviderRequest, opts ...grpc.CallOption) (*ProviderResponse, error)
+	// 设置某 umo 的当前 provider。
+	SetProvider(ctx context.Context, in *SetProviderRequest, opts ...grpc.CallOption) (*Empty, error)
+	// 取 provider 的模型列表。
+	GetProviderModels(ctx context.Context, in *GetProviderModelsRequest, opts ...grpc.CallOption) (*ProviderModelsResponse, error)
+	// ── 插件/Star 管理（对齐 Python AstrBot star_manager）──
+	// 列出全部已安装插件（Star 元数据）。
+	ListStars(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*StarsResponse, error)
+	// 按插件名取 Star 元数据。
+	GetStar(ctx context.Context, in *GetStarRequest, opts ...grpc.CallOption) (*StarResponse, error)
+	// 启用/禁用插件。
+	SetPluginEnabled(ctx context.Context, in *SetPluginEnabledRequest, opts ...grpc.CallOption) (*Empty, error)
+	// 安装插件（git/url 源）。
+	InstallPlugin(ctx context.Context, in *InstallPluginRequest, opts ...grpc.CallOption) (*Empty, error)
+	// 卸载插件。
+	UninstallPlugin(ctx context.Context, in *UninstallPluginRequest, opts ...grpc.CallOption) (*Empty, error)
 }
 
 type hostServiceClient struct {
@@ -703,6 +770,216 @@ func (c *hostServiceClient) TextToImage(ctx context.Context, in *TextToImageRequ
 	return out, nil
 }
 
+func (c *hostServiceClient) GetCurrConversationID(ctx context.Context, in *ConversationIDRequest, opts ...grpc.CallOption) (*ConversationIDResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConversationIDResponse)
+	err := c.cc.Invoke(ctx, HostService_GetCurrConversationID_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) NewConversation(ctx context.Context, in *NewConversationRequest, opts ...grpc.CallOption) (*ConversationIDResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConversationIDResponse)
+	err := c.cc.Invoke(ctx, HostService_NewConversation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) GetConversation(ctx context.Context, in *GetConversationRequest, opts ...grpc.CallOption) (*ConversationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConversationResponse)
+	err := c.cc.Invoke(ctx, HostService_GetConversation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) GetConversations(ctx context.Context, in *GetConversationsRequest, opts ...grpc.CallOption) (*ConversationsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConversationsResponse)
+	err := c.cc.Invoke(ctx, HostService_GetConversations_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) DeleteConversation(ctx context.Context, in *DeleteConversationRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_DeleteConversation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) SwitchConversation(ctx context.Context, in *SwitchConversationRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_SwitchConversation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) UpdateConversationTitle(ctx context.Context, in *UpdateConversationTitleRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_UpdateConversationTitle_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) UpdateConversationPersonaID(ctx context.Context, in *UpdateConversationPersonaRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_UpdateConversationPersonaID_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) GetPersonas(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*PersonasResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PersonasResponse)
+	err := c.cc.Invoke(ctx, HostService_GetPersonas_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) GetDefaultPersona(ctx context.Context, in *GetDefaultPersonaRequest, opts ...grpc.CallOption) (*PersonaResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PersonaResponse)
+	err := c.cc.Invoke(ctx, HostService_GetDefaultPersona_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) GetPersonaTree(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*PersonaTreeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PersonaTreeResponse)
+	err := c.cc.Invoke(ctx, HostService_GetPersonaTree_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) ResolveSelectedPersona(ctx context.Context, in *ResolvePersonaRequest, opts ...grpc.CallOption) (*ResolvePersonaResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolvePersonaResponse)
+	err := c.cc.Invoke(ctx, HostService_ResolveSelectedPersona_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) ListProviders(ctx context.Context, in *ListProvidersRequest, opts ...grpc.CallOption) (*ProvidersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProvidersResponse)
+	err := c.cc.Invoke(ctx, HostService_ListProviders_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) GetUsingProvider(ctx context.Context, in *GetUsingProviderRequest, opts ...grpc.CallOption) (*ProviderResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProviderResponse)
+	err := c.cc.Invoke(ctx, HostService_GetUsingProvider_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) SetProvider(ctx context.Context, in *SetProviderRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_SetProvider_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) GetProviderModels(ctx context.Context, in *GetProviderModelsRequest, opts ...grpc.CallOption) (*ProviderModelsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProviderModelsResponse)
+	err := c.cc.Invoke(ctx, HostService_GetProviderModels_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) ListStars(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*StarsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StarsResponse)
+	err := c.cc.Invoke(ctx, HostService_ListStars_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) GetStar(ctx context.Context, in *GetStarRequest, opts ...grpc.CallOption) (*StarResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StarResponse)
+	err := c.cc.Invoke(ctx, HostService_GetStar_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) SetPluginEnabled(ctx context.Context, in *SetPluginEnabledRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_SetPluginEnabled_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) InstallPlugin(ctx context.Context, in *InstallPluginRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_InstallPlugin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) UninstallPlugin(ctx context.Context, in *UninstallPluginRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_UninstallPlugin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // HostServiceServer is the server API for HostService service.
 // All implementations must embed UnimplementedHostServiceServer
 // for forward compatibility.
@@ -726,6 +1003,52 @@ type HostServiceServer interface {
 	// TextToImage renders text into an image (host t2i engine) and returns the
 	// PNG bytes (base64). The plugin can then send it as an Image component.
 	TextToImage(context.Context, *TextToImageRequest) (*TextToImageResponse, error)
+	// ── 会话管理（对齐 Python AstrBot conversation_manager）──
+	// 取会话当前 ID（umo 无会话时返回空串）。
+	GetCurrConversationID(context.Context, *ConversationIDRequest) (*ConversationIDResponse, error)
+	// 新建会话（设为当前）并返回其 ID。
+	NewConversation(context.Context, *NewConversationRequest) (*ConversationIDResponse, error)
+	// 按 umo+cid 取会话（create_if_not_exists 时不存在则新建）。
+	GetConversation(context.Context, *GetConversationRequest) (*ConversationResponse, error)
+	// 列出某 umo 的全部会话（无 umo 时列出全部）。
+	GetConversations(context.Context, *GetConversationsRequest) (*ConversationsResponse, error)
+	// 删除会话（按 umo+cid；cid 空时删除当前会话）。
+	DeleteConversation(context.Context, *DeleteConversationRequest) (*Empty, error)
+	// 切换当前会话（设置 umo 的 current cid）。
+	SwitchConversation(context.Context, *SwitchConversationRequest) (*Empty, error)
+	// 更新会话标题。
+	UpdateConversationTitle(context.Context, *UpdateConversationTitleRequest) (*Empty, error)
+	// 更新会话绑定的人格。
+	UpdateConversationPersonaID(context.Context, *UpdateConversationPersonaRequest) (*Empty, error)
+	// ── 人格管理（对齐 Python AstrBot persona_manager）──
+	// 取全部人格。
+	GetPersonas(context.Context, *Empty) (*PersonasResponse, error)
+	// 取默认人格（按 umo 解析默认人格 id/name）。
+	GetDefaultPersona(context.Context, *GetDefaultPersonaRequest) (*PersonaResponse, error)
+	// 取文件夹树（嵌套结构）+ 全部人格。
+	GetPersonaTree(context.Context, *Empty) (*PersonaTreeResponse, error)
+	// 解析当前生效人格（会话/规则/默认的优先级合并）。
+	ResolveSelectedPersona(context.Context, *ResolvePersonaRequest) (*ResolvePersonaResponse, error)
+	// ── Provider 管理（对齐 Python AstrBot provider_manager）──
+	// 列出全部 provider（按能力类型过滤，空=全部）。
+	ListProviders(context.Context, *ListProvidersRequest) (*ProvidersResponse, error)
+	// 取某 umo 当前使用的 provider（按能力类型）。
+	GetUsingProvider(context.Context, *GetUsingProviderRequest) (*ProviderResponse, error)
+	// 设置某 umo 的当前 provider。
+	SetProvider(context.Context, *SetProviderRequest) (*Empty, error)
+	// 取 provider 的模型列表。
+	GetProviderModels(context.Context, *GetProviderModelsRequest) (*ProviderModelsResponse, error)
+	// ── 插件/Star 管理（对齐 Python AstrBot star_manager）──
+	// 列出全部已安装插件（Star 元数据）。
+	ListStars(context.Context, *Empty) (*StarsResponse, error)
+	// 按插件名取 Star 元数据。
+	GetStar(context.Context, *GetStarRequest) (*StarResponse, error)
+	// 启用/禁用插件。
+	SetPluginEnabled(context.Context, *SetPluginEnabledRequest) (*Empty, error)
+	// 安装插件（git/url 源）。
+	InstallPlugin(context.Context, *InstallPluginRequest) (*Empty, error)
+	// 卸载插件。
+	UninstallPlugin(context.Context, *UninstallPluginRequest) (*Empty, error)
 	mustEmbedUnimplementedHostServiceServer()
 }
 
@@ -759,6 +1082,69 @@ func (UnimplementedHostServiceServer) React(context.Context, *ReactRequest) (*Em
 }
 func (UnimplementedHostServiceServer) TextToImage(context.Context, *TextToImageRequest) (*TextToImageResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method TextToImage not implemented")
+}
+func (UnimplementedHostServiceServer) GetCurrConversationID(context.Context, *ConversationIDRequest) (*ConversationIDResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetCurrConversationID not implemented")
+}
+func (UnimplementedHostServiceServer) NewConversation(context.Context, *NewConversationRequest) (*ConversationIDResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method NewConversation not implemented")
+}
+func (UnimplementedHostServiceServer) GetConversation(context.Context, *GetConversationRequest) (*ConversationResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetConversation not implemented")
+}
+func (UnimplementedHostServiceServer) GetConversations(context.Context, *GetConversationsRequest) (*ConversationsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetConversations not implemented")
+}
+func (UnimplementedHostServiceServer) DeleteConversation(context.Context, *DeleteConversationRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteConversation not implemented")
+}
+func (UnimplementedHostServiceServer) SwitchConversation(context.Context, *SwitchConversationRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SwitchConversation not implemented")
+}
+func (UnimplementedHostServiceServer) UpdateConversationTitle(context.Context, *UpdateConversationTitleRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateConversationTitle not implemented")
+}
+func (UnimplementedHostServiceServer) UpdateConversationPersonaID(context.Context, *UpdateConversationPersonaRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateConversationPersonaID not implemented")
+}
+func (UnimplementedHostServiceServer) GetPersonas(context.Context, *Empty) (*PersonasResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetPersonas not implemented")
+}
+func (UnimplementedHostServiceServer) GetDefaultPersona(context.Context, *GetDefaultPersonaRequest) (*PersonaResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetDefaultPersona not implemented")
+}
+func (UnimplementedHostServiceServer) GetPersonaTree(context.Context, *Empty) (*PersonaTreeResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetPersonaTree not implemented")
+}
+func (UnimplementedHostServiceServer) ResolveSelectedPersona(context.Context, *ResolvePersonaRequest) (*ResolvePersonaResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ResolveSelectedPersona not implemented")
+}
+func (UnimplementedHostServiceServer) ListProviders(context.Context, *ListProvidersRequest) (*ProvidersResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListProviders not implemented")
+}
+func (UnimplementedHostServiceServer) GetUsingProvider(context.Context, *GetUsingProviderRequest) (*ProviderResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetUsingProvider not implemented")
+}
+func (UnimplementedHostServiceServer) SetProvider(context.Context, *SetProviderRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetProvider not implemented")
+}
+func (UnimplementedHostServiceServer) GetProviderModels(context.Context, *GetProviderModelsRequest) (*ProviderModelsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetProviderModels not implemented")
+}
+func (UnimplementedHostServiceServer) ListStars(context.Context, *Empty) (*StarsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListStars not implemented")
+}
+func (UnimplementedHostServiceServer) GetStar(context.Context, *GetStarRequest) (*StarResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetStar not implemented")
+}
+func (UnimplementedHostServiceServer) SetPluginEnabled(context.Context, *SetPluginEnabledRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetPluginEnabled not implemented")
+}
+func (UnimplementedHostServiceServer) InstallPlugin(context.Context, *InstallPluginRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method InstallPlugin not implemented")
+}
+func (UnimplementedHostServiceServer) UninstallPlugin(context.Context, *UninstallPluginRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UninstallPlugin not implemented")
 }
 func (UnimplementedHostServiceServer) mustEmbedUnimplementedHostServiceServer() {}
 func (UnimplementedHostServiceServer) testEmbeddedByValue()                     {}
@@ -925,6 +1311,384 @@ func _HostService_TextToImage_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HostService_GetCurrConversationID_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConversationIDRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).GetCurrConversationID(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_GetCurrConversationID_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).GetCurrConversationID(ctx, req.(*ConversationIDRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_NewConversation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(NewConversationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).NewConversation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_NewConversation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).NewConversation(ctx, req.(*NewConversationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_GetConversation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetConversationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).GetConversation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_GetConversation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).GetConversation(ctx, req.(*GetConversationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_GetConversations_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetConversationsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).GetConversations(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_GetConversations_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).GetConversations(ctx, req.(*GetConversationsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_DeleteConversation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteConversationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).DeleteConversation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_DeleteConversation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).DeleteConversation(ctx, req.(*DeleteConversationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_SwitchConversation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SwitchConversationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).SwitchConversation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_SwitchConversation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).SwitchConversation(ctx, req.(*SwitchConversationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_UpdateConversationTitle_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateConversationTitleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).UpdateConversationTitle(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_UpdateConversationTitle_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).UpdateConversationTitle(ctx, req.(*UpdateConversationTitleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_UpdateConversationPersonaID_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateConversationPersonaRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).UpdateConversationPersonaID(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_UpdateConversationPersonaID_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).UpdateConversationPersonaID(ctx, req.(*UpdateConversationPersonaRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_GetPersonas_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).GetPersonas(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_GetPersonas_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).GetPersonas(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_GetDefaultPersona_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetDefaultPersonaRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).GetDefaultPersona(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_GetDefaultPersona_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).GetDefaultPersona(ctx, req.(*GetDefaultPersonaRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_GetPersonaTree_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).GetPersonaTree(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_GetPersonaTree_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).GetPersonaTree(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_ResolveSelectedPersona_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolvePersonaRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).ResolveSelectedPersona(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_ResolveSelectedPersona_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).ResolveSelectedPersona(ctx, req.(*ResolvePersonaRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_ListProviders_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListProvidersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).ListProviders(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_ListProviders_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).ListProviders(ctx, req.(*ListProvidersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_GetUsingProvider_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetUsingProviderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).GetUsingProvider(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_GetUsingProvider_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).GetUsingProvider(ctx, req.(*GetUsingProviderRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_SetProvider_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetProviderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).SetProvider(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_SetProvider_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).SetProvider(ctx, req.(*SetProviderRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_GetProviderModels_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetProviderModelsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).GetProviderModels(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_GetProviderModels_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).GetProviderModels(ctx, req.(*GetProviderModelsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_ListStars_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).ListStars(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_ListStars_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).ListStars(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_GetStar_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetStarRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).GetStar(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_GetStar_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).GetStar(ctx, req.(*GetStarRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_SetPluginEnabled_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetPluginEnabledRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).SetPluginEnabled(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_SetPluginEnabled_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).SetPluginEnabled(ctx, req.(*SetPluginEnabledRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_InstallPlugin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InstallPluginRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).InstallPlugin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_InstallPlugin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).InstallPlugin(ctx, req.(*InstallPluginRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_UninstallPlugin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UninstallPluginRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).UninstallPlugin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_UninstallPlugin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).UninstallPlugin(ctx, req.(*UninstallPluginRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // HostService_ServiceDesc is the grpc.ServiceDesc for HostService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -963,6 +1727,90 @@ var HostService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "TextToImage",
 			Handler:    _HostService_TextToImage_Handler,
+		},
+		{
+			MethodName: "GetCurrConversationID",
+			Handler:    _HostService_GetCurrConversationID_Handler,
+		},
+		{
+			MethodName: "NewConversation",
+			Handler:    _HostService_NewConversation_Handler,
+		},
+		{
+			MethodName: "GetConversation",
+			Handler:    _HostService_GetConversation_Handler,
+		},
+		{
+			MethodName: "GetConversations",
+			Handler:    _HostService_GetConversations_Handler,
+		},
+		{
+			MethodName: "DeleteConversation",
+			Handler:    _HostService_DeleteConversation_Handler,
+		},
+		{
+			MethodName: "SwitchConversation",
+			Handler:    _HostService_SwitchConversation_Handler,
+		},
+		{
+			MethodName: "UpdateConversationTitle",
+			Handler:    _HostService_UpdateConversationTitle_Handler,
+		},
+		{
+			MethodName: "UpdateConversationPersonaID",
+			Handler:    _HostService_UpdateConversationPersonaID_Handler,
+		},
+		{
+			MethodName: "GetPersonas",
+			Handler:    _HostService_GetPersonas_Handler,
+		},
+		{
+			MethodName: "GetDefaultPersona",
+			Handler:    _HostService_GetDefaultPersona_Handler,
+		},
+		{
+			MethodName: "GetPersonaTree",
+			Handler:    _HostService_GetPersonaTree_Handler,
+		},
+		{
+			MethodName: "ResolveSelectedPersona",
+			Handler:    _HostService_ResolveSelectedPersona_Handler,
+		},
+		{
+			MethodName: "ListProviders",
+			Handler:    _HostService_ListProviders_Handler,
+		},
+		{
+			MethodName: "GetUsingProvider",
+			Handler:    _HostService_GetUsingProvider_Handler,
+		},
+		{
+			MethodName: "SetProvider",
+			Handler:    _HostService_SetProvider_Handler,
+		},
+		{
+			MethodName: "GetProviderModels",
+			Handler:    _HostService_GetProviderModels_Handler,
+		},
+		{
+			MethodName: "ListStars",
+			Handler:    _HostService_ListStars_Handler,
+		},
+		{
+			MethodName: "GetStar",
+			Handler:    _HostService_GetStar_Handler,
+		},
+		{
+			MethodName: "SetPluginEnabled",
+			Handler:    _HostService_SetPluginEnabled_Handler,
+		},
+		{
+			MethodName: "InstallPlugin",
+			Handler:    _HostService_InstallPlugin_Handler,
+		},
+		{
+			MethodName: "UninstallPlugin",
+			Handler:    _HostService_UninstallPlugin_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

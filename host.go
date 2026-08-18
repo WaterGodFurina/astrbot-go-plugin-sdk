@@ -274,6 +274,57 @@ type HostServiceHooks struct {
 	React func(platform, sessionID, messageID, emoji string) error
 	// TextToImage renders text into an image, returning base64 PNG bytes.
 	TextToImage func(text, templateName string) (string, error)
+
+	// ── 会话管理（对齐 Python conversation_manager）──
+	// GetCurrConversationID 返回 umo 的当前会话 ID（无会话返回 ""）。
+	GetCurrConversationID func(unifiedMsgOrigin string) string
+	// NewConversation 新建会话（设为当前），返回其 ID。
+	NewConversation func(unifiedMsgOrigin, platformID, personaID string) string
+	// GetConversation 按 umo+cid 取会话（createIfNotExists 时不存在则新建），
+	// 返回序列化 JSON map（cid/title/persona_id/history/updated_at/...）。
+	GetConversation func(unifiedMsgOrigin, cid string, createIfNotExists bool) map[string]any
+	// GetConversations 列出 umo 的全部会话（umo 空 = 全部）。
+	GetConversations func(unifiedMsgOrigin string) []map[string]any
+	// DeleteConversation 删除会话（cid 空 = 当前会话）。
+	DeleteConversation func(unifiedMsgOrigin, cid string) error
+	// SwitchConversation 切换 umo 的当前会话。
+	SwitchConversation func(unifiedMsgOrigin, cid string) error
+	// UpdateConversationTitle 更新会话标题。
+	UpdateConversationTitle func(unifiedMsgOrigin, cid, title string) error
+	// UpdateConversationPersonaID 更新会话绑定人格。
+	UpdateConversationPersonaID func(unifiedMsgOrigin, cid, personaID string) error
+
+	// ── 人格管理（对齐 Python persona_manager）──
+	// GetPersonas 返回全部人格（PersonaPayload 序列化 map）。
+	GetPersonas func() []map[string]any
+	// GetDefaultPersona 按 umo 解析默认人格。
+	GetDefaultPersona func(umo string) map[string]any
+	// GetPersonaTree 返回文件夹树（嵌套）与全部人格。
+	GetPersonaTree func() (folders []map[string]any, personas []map[string]any)
+	// ResolveSelectedPersona 解析当前生效人格。
+	ResolveSelectedPersona func(umo, conversationPersonaID, platformName string, providerSettings map[string]any) (personaID, personaName, personaPrompt, forceAppliedPersonaID string, isDefault bool)
+
+	// ── Provider 管理（对齐 Python provider_manager）──
+	// ListProviders 按能力类型列出全部 provider。
+	ListProviders func(capability string) []map[string]any
+	// GetUsingProvider 取 umo 当前使用的 provider（按能力类型）。
+	GetUsingProvider func(umo, capability string) map[string]any
+	// SetProvider 设置 umo 的当前 provider。
+	SetProvider func(umo, providerID, capability string) error
+	// GetProviderModels 取 provider 的模型列表。
+	GetProviderModels func(providerID string) []string
+
+	// ── 插件/Star 管理（对齐 Python star_manager）──
+	// ListStars 返回全部已安装插件元数据。
+	ListStars func() []map[string]any
+	// GetStar 按插件名取元数据。
+	GetStar func(name string) map[string]any
+	// SetPluginEnabled 启用/禁用插件。
+	SetPluginEnabled func(pluginName string, enabled bool) error
+	// InstallPlugin 安装插件（git/url 源）。
+	InstallPlugin func(repo string) error
+	// UninstallPlugin 卸载插件。
+	UninstallPlugin func(pluginName string) error
 }
 
 var (
@@ -512,6 +563,253 @@ func (s *hostServiceServer) TextToImage(_ context.Context, req *sdkv1.TextToImag
 		return nil, err
 	}
 	return &sdkv1.TextToImageResponse{ImageBase64: b64}, nil
+}
+
+// ── 会话管理 RPC 实现 ──────────────────────────────────────────────────────
+
+func (s *hostServiceServer) GetCurrConversationID(_ context.Context, req *sdkv1.ConversationIDRequest) (*sdkv1.ConversationIDResponse, error) {
+	h := getHostHooks()
+	if h.GetCurrConversationID == nil {
+		return &sdkv1.ConversationIDResponse{}, nil
+	}
+	return &sdkv1.ConversationIDResponse{Cid: h.GetCurrConversationID(req.UnifiedMsgOrigin)}, nil
+}
+
+func (s *hostServiceServer) NewConversation(_ context.Context, req *sdkv1.NewConversationRequest) (*sdkv1.ConversationIDResponse, error) {
+	h := getHostHooks()
+	if h.NewConversation == nil {
+		return &sdkv1.ConversationIDResponse{}, nil
+	}
+	return &sdkv1.ConversationIDResponse{Cid: h.NewConversation(req.UnifiedMsgOrigin, req.PlatformId, req.PersonaId)}, nil
+}
+
+func (s *hostServiceServer) GetConversation(_ context.Context, req *sdkv1.GetConversationRequest) (*sdkv1.ConversationResponse, error) {
+	h := getHostHooks()
+	if h.GetConversation == nil {
+		return &sdkv1.ConversationResponse{}, nil
+	}
+	out, _ := json.Marshal(h.GetConversation(req.UnifiedMsgOrigin, req.ConversationId, req.CreateIfNotExists))
+	return &sdkv1.ConversationResponse{ConversationJson: out}, nil
+}
+
+func (s *hostServiceServer) GetConversations(_ context.Context, req *sdkv1.GetConversationsRequest) (*sdkv1.ConversationsResponse, error) {
+	h := getHostHooks()
+	if h.GetConversations == nil {
+		return &sdkv1.ConversationsResponse{}, nil
+	}
+	resp := &sdkv1.ConversationsResponse{}
+	for _, c := range h.GetConversations(req.UnifiedMsgOrigin) {
+		out, _ := json.Marshal(c)
+		resp.ConversationsJson = append(resp.ConversationsJson, out)
+	}
+	return resp, nil
+}
+
+func (s *hostServiceServer) DeleteConversation(_ context.Context, req *sdkv1.DeleteConversationRequest) (*sdkv1.Empty, error) {
+	h := getHostHooks()
+	if h.DeleteConversation == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	if err := h.DeleteConversation(req.UnifiedMsgOrigin, req.ConversationId); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
+}
+
+func (s *hostServiceServer) SwitchConversation(_ context.Context, req *sdkv1.SwitchConversationRequest) (*sdkv1.Empty, error) {
+	h := getHostHooks()
+	if h.SwitchConversation == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	if err := h.SwitchConversation(req.UnifiedMsgOrigin, req.ConversationId); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
+}
+
+func (s *hostServiceServer) UpdateConversationTitle(_ context.Context, req *sdkv1.UpdateConversationTitleRequest) (*sdkv1.Empty, error) {
+	h := getHostHooks()
+	if h.UpdateConversationTitle == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	if err := h.UpdateConversationTitle(req.UnifiedMsgOrigin, req.ConversationId, req.Title); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
+}
+
+func (s *hostServiceServer) UpdateConversationPersonaID(_ context.Context, req *sdkv1.UpdateConversationPersonaRequest) (*sdkv1.Empty, error) {
+	h := getHostHooks()
+	if h.UpdateConversationPersonaID == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	if err := h.UpdateConversationPersonaID(req.UnifiedMsgOrigin, req.ConversationId, req.PersonaId); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
+}
+
+// ── 人格管理 RPC 实现 ──────────────────────────────────────────────────────
+
+func (s *hostServiceServer) GetPersonas(_ context.Context, _ *sdkv1.Empty) (*sdkv1.PersonasResponse, error) {
+	h := getHostHooks()
+	if h.GetPersonas == nil {
+		return &sdkv1.PersonasResponse{}, nil
+	}
+	resp := &sdkv1.PersonasResponse{}
+	for _, p := range h.GetPersonas() {
+		out, _ := json.Marshal(p)
+		resp.PersonasJson = append(resp.PersonasJson, out)
+	}
+	return resp, nil
+}
+
+func (s *hostServiceServer) GetDefaultPersona(_ context.Context, req *sdkv1.GetDefaultPersonaRequest) (*sdkv1.PersonaResponse, error) {
+	h := getHostHooks()
+	if h.GetDefaultPersona == nil {
+		return &sdkv1.PersonaResponse{}, nil
+	}
+	out, _ := json.Marshal(h.GetDefaultPersona(req.Umo))
+	return &sdkv1.PersonaResponse{PersonaJson: out}, nil
+}
+
+func (s *hostServiceServer) GetPersonaTree(_ context.Context, _ *sdkv1.Empty) (*sdkv1.PersonaTreeResponse, error) {
+	h := getHostHooks()
+	if h.GetPersonaTree == nil {
+		return &sdkv1.PersonaTreeResponse{}, nil
+	}
+	folders, personas := h.GetPersonaTree()
+	resp := &sdkv1.PersonaTreeResponse{}
+	for _, f := range folders {
+		out, _ := json.Marshal(f)
+		resp.FoldersJson = append(resp.FoldersJson, out)
+	}
+	for _, p := range personas {
+		out, _ := json.Marshal(p)
+		resp.PersonasJson = append(resp.PersonasJson, out)
+	}
+	return resp, nil
+}
+
+func (s *hostServiceServer) ResolveSelectedPersona(_ context.Context, req *sdkv1.ResolvePersonaRequest) (*sdkv1.ResolvePersonaResponse, error) {
+	h := getHostHooks()
+	if h.ResolveSelectedPersona == nil {
+		return &sdkv1.ResolvePersonaResponse{}, nil
+	}
+	settings := map[string]any{}
+	if len(req.ProviderSettingsJson) > 0 {
+		_ = json.Unmarshal(req.ProviderSettingsJson, &settings)
+	}
+	personaID, personaName, personaPrompt, forceApplied, isDefault := h.ResolveSelectedPersona(
+		req.Umo, req.ConversationPersonaId, req.PlatformName, settings,
+	)
+	return &sdkv1.ResolvePersonaResponse{
+		PersonaId:            personaID,
+		PersonaName:          personaName,
+		PersonaPrompt:        personaPrompt,
+		ForceAppliedPersonaId: forceApplied,
+		IsDefault:            isDefault,
+	}, nil
+}
+
+// ── Provider 管理 RPC 实现 ─────────────────────────────────────────────────
+
+func (s *hostServiceServer) ListProviders(_ context.Context, req *sdkv1.ListProvidersRequest) (*sdkv1.ProvidersResponse, error) {
+	h := getHostHooks()
+	if h.ListProviders == nil {
+		return &sdkv1.ProvidersResponse{}, nil
+	}
+	resp := &sdkv1.ProvidersResponse{}
+	for _, p := range h.ListProviders(req.Capability) {
+		out, _ := json.Marshal(p)
+		resp.ProvidersJson = append(resp.ProvidersJson, out)
+	}
+	return resp, nil
+}
+
+func (s *hostServiceServer) GetUsingProvider(_ context.Context, req *sdkv1.GetUsingProviderRequest) (*sdkv1.ProviderResponse, error) {
+	h := getHostHooks()
+	if h.GetUsingProvider == nil {
+		return &sdkv1.ProviderResponse{}, nil
+	}
+	out, _ := json.Marshal(h.GetUsingProvider(req.Umo, req.Capability))
+	return &sdkv1.ProviderResponse{ProviderJson: out}, nil
+}
+
+func (s *hostServiceServer) SetProvider(_ context.Context, req *sdkv1.SetProviderRequest) (*sdkv1.Empty, error) {
+	h := getHostHooks()
+	if h.SetProvider == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	if err := h.SetProvider(req.Umo, req.ProviderId, req.Capability); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
+}
+
+func (s *hostServiceServer) GetProviderModels(_ context.Context, req *sdkv1.GetProviderModelsRequest) (*sdkv1.ProviderModelsResponse, error) {
+	h := getHostHooks()
+	if h.GetProviderModels == nil {
+		return &sdkv1.ProviderModelsResponse{}, nil
+	}
+	return &sdkv1.ProviderModelsResponse{Models: h.GetProviderModels(req.ProviderId)}, nil
+}
+
+// ── 插件/Star 管理 RPC 实现 ────────────────────────────────────────────────
+
+func (s *hostServiceServer) ListStars(_ context.Context, _ *sdkv1.Empty) (*sdkv1.StarsResponse, error) {
+	h := getHostHooks()
+	if h.ListStars == nil {
+		return &sdkv1.StarsResponse{}, nil
+	}
+	resp := &sdkv1.StarsResponse{}
+	for _, st := range h.ListStars() {
+		out, _ := json.Marshal(st)
+		resp.StarsJson = append(resp.StarsJson, out)
+	}
+	return resp, nil
+}
+
+func (s *hostServiceServer) GetStar(_ context.Context, req *sdkv1.GetStarRequest) (*sdkv1.StarResponse, error) {
+	h := getHostHooks()
+	if h.GetStar == nil {
+		return &sdkv1.StarResponse{}, nil
+	}
+	out, _ := json.Marshal(h.GetStar(req.Name))
+	return &sdkv1.StarResponse{StarJson: out}, nil
+}
+
+func (s *hostServiceServer) SetPluginEnabled(_ context.Context, req *sdkv1.SetPluginEnabledRequest) (*sdkv1.Empty, error) {
+	h := getHostHooks()
+	if h.SetPluginEnabled == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	if err := h.SetPluginEnabled(req.PluginName, req.Enabled); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
+}
+
+func (s *hostServiceServer) InstallPlugin(_ context.Context, req *sdkv1.InstallPluginRequest) (*sdkv1.Empty, error) {
+	h := getHostHooks()
+	if h.InstallPlugin == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	if err := h.InstallPlugin(req.Repo); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
+}
+
+func (s *hostServiceServer) UninstallPlugin(_ context.Context, req *sdkv1.UninstallPluginRequest) (*sdkv1.Empty, error) {
+	h := getHostHooks()
+	if h.UninstallPlugin == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	if err := h.UninstallPlugin(req.PluginName); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
 }
 
 // maxChatLLMPerMinute 每插件每分钟 ChatLLM 反向调用上限。
