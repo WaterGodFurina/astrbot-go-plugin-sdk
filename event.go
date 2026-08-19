@@ -6,8 +6,6 @@
 // contract defined in proto/plugin.proto and generated under gen/.
 package sdk
 
-import "encoding/json"
-
 // ComponentType identifies the kind of message component.
 // Values mirror pkg/message.ComponentType in the host.
 type ComponentType string
@@ -137,6 +135,3 @@ func (e *Event) GetMessageStr() string {
 	}
 	return e.MessageStr
 }
-
-// MarshalJSON is provided for convenience/validation.
-func (e *Event) MarshalJSON() ([]byte, error) { return json.Marshal(*e) }

@@ -1,6 +1,9 @@
 package sdk
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 // Package-level handler registry enabling imperative (non-struct) handler
 // registration. Handlers registered here are merged into the Plugin passed to
@@ -192,6 +195,18 @@ func RegisterAgentDoneHook(h AgentDoneHook) {
 	global.agentDoneHooks = append(global.agentDoneHooks, h)
 }
 
+// normalizePermission validates a command's Permission string. Values other
+// than "admin" (case-insensitive) fall back to "everyone", matching the
+// permission vocabulary the host consumes in CommandDesc.Permission.
+func normalizePermission(p string) string {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case "admin":
+		return "admin"
+	default:
+		return "everyone"
+	}
+}
+
 // drain merges the global registry into p, preserving p's own entries after
 // the registered ones. Called by Serve after OnLoad so registrations made from
 // init()/OnLoad() are all captured.
@@ -201,6 +216,9 @@ func (r *registry) drain(p *Plugin) {
 	cmds := make([]Command, 0, len(r.commands)+len(p.Commands))
 	cmds = append(cmds, r.commands...)
 	cmds = append(cmds, p.Commands...)
+	for i := range cmds {
+		cmds[i].Permission = normalizePermission(cmds[i].Permission)
+	}
 	p.Commands = cmds
 
 	filters := make([]Filter, 0, len(r.filters)+len(p.Filters))

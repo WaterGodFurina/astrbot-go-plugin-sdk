@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
 	"sync"
 	"time"
 
 	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -54,6 +56,16 @@ func setBroker(b *plugin.GRPCBroker) {
 }
 
 func hostServiceClient() (sdkv1.HostServiceClient, error) {
+	// 先在 brokerMu 内取出 broker 引用并立即释放读取锁，再进入 hostMu。
+	// 避免与 setBroker（brokerMu → hostMu 嵌套）构成 AB-BA 死锁：本函数
+	// 在取得 hostMu 前已释放 brokerMu，任何时刻都不嵌套持有两把锁。
+	brokerMu.RLock()
+	b := broker
+	brokerMu.RUnlock()
+	if b == nil {
+		return nil, errNoBroker
+	}
+
 	hostMu.Lock()
 	defer hostMu.Unlock()
 	// Only cache SUCCESS: a transient dial failure (e.g. host broker not ready
@@ -62,12 +74,6 @@ func hostServiceClient() (sdkv1.HostServiceClient, error) {
 	// to default config (the 401 symptom).
 	if hostDialDone && hostSvc != nil {
 		return hostSvc, nil
-	}
-	brokerMu.RLock()
-	b := broker
-	brokerMu.RUnlock()
-	if b == nil {
-		return nil, errNoBroker
 	}
 	conn, err := b.DialWithOptions(HostServiceAppID,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -90,6 +96,17 @@ type hostUnavailableError struct{ msg string }
 
 func (e *hostUnavailableError) Error() string { return e.msg }
 
+// hostRPCTimeout 是插件→宿主反向调用的默认超时。宿主 hook 是第三方代码，
+// 卡死时插件 handler 不能无限阻塞（26-7），与 python-sdk 的 30-180s
+// timeout 对齐。
+const hostRPCTimeout = 30 * time.Second
+
+// hostRPCCtx 返回带默认超时的上下文，供 Host API 内部 RPC 使用。调用方必须
+// defer cancel() 释放定时器。
+func hostRPCCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), hostRPCTimeout)
+}
+
 // Host is the plugin-facing reverse-call API into the AstrBot host process.
 // It is only available while the plugin is being served (i.e. inside
 // command/filter/hook/tool handlers, not inside OnLoad).
@@ -110,7 +127,9 @@ func (h *host) CallAction(platform, api string, params map[string]any) (map[stri
 	if err != nil {
 		return nil, err
 	}
-	resp, err := svc.CallAction(context.Background(), &sdkv1.CallActionRequest{
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.CallAction(ctx, &sdkv1.CallActionRequest{
 		Platform:   platform,
 		Api:        api,
 		ParamsJson: paramsJSON,
@@ -138,7 +157,9 @@ func (h *host) SendMessage(platform, sessionID string, chain []Component) error 
 	if err != nil {
 		return err
 	}
-	_, err = svc.SendMessage(context.Background(), &sdkv1.SendMessageRequest{
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	_, err = svc.SendMessage(ctx, &sdkv1.SendMessageRequest{
 		Platform:  platform,
 		SessionId: sessionID,
 		ChainJson: chainJSON,
@@ -152,7 +173,9 @@ func (h *host) RecallMessage(platform, messageID string) error {
 	if err != nil {
 		return err
 	}
-	_, err = svc.RecallMessage(context.Background(), &sdkv1.RecallMessageRequest{
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	_, err = svc.RecallMessage(ctx, &sdkv1.RecallMessageRequest{
 		Platform:  platform,
 		MessageId: messageID,
 	})
@@ -166,7 +189,9 @@ func (h *host) GetConfig(pluginName string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := svc.GetConfig(context.Background(), &sdkv1.GetConfigRequest{
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.GetConfig(ctx, &sdkv1.GetConfigRequest{
 		PluginName: pluginName,
 	})
 	if err != nil {
@@ -193,7 +218,9 @@ func (h *host) SetConfig(pluginName string, cfg map[string]any) error {
 	if err != nil {
 		return err
 	}
-	_, err = svc.SetConfig(context.Background(), &sdkv1.SetConfigRequest{
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	_, err = svc.SetConfig(ctx, &sdkv1.SetConfigRequest{
 		PluginName: pluginName,
 		ConfigJson: cfgJSON,
 	})
@@ -207,7 +234,9 @@ func (h *host) ChatLLM(prompt, systemPrompt string, imageURLs []string) (string,
 	if err != nil {
 		return "", err
 	}
-	resp, err := svc.ChatLLM(context.Background(), &sdkv1.ChatLLMRequest{
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.ChatLLM(ctx, &sdkv1.ChatLLMRequest{
 		Prompt:       prompt,
 		SystemPrompt: systemPrompt,
 		ImageUrls:    imageURLs,
@@ -224,7 +253,9 @@ func (h *host) React(platform, sessionID, messageID, emoji string) error {
 	if err != nil {
 		return err
 	}
-	_, err = svc.React(context.Background(), &sdkv1.ReactRequest{
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	_, err = svc.React(ctx, &sdkv1.ReactRequest{
 		Platform:  platform,
 		SessionId: sessionID,
 		MessageId: messageID,
@@ -240,7 +271,9 @@ func (h *host) TextToImage(text, templateName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	resp, err := svc.TextToImage(context.Background(), &sdkv1.TextToImageRequest{
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.TextToImage(ctx, &sdkv1.TextToImageRequest{
 		Text:         text,
 		TemplateName: templateName,
 	})
@@ -354,14 +387,76 @@ func getHostHooks() HostServiceHooks {
 	return hostHooks
 }
 
+// hostServiceLogger 是宿主侧 HostService 的告警日志通道。SDK 没有宿主注入
+// 的 logger，默认输出到 stderr；宿主可在启动插件前通过 SetHostServiceLogger
+// 替换为自带 logger。
+var hostServiceLogger = hclog.New(&hclog.LoggerOptions{
+	Name:   "astrbot-sdk.hostservice",
+	Level:  hclog.Warn,
+	Output: os.Stderr,
+})
+
+// SetHostServiceLogger 替换宿主侧 HostService 的告警 logger（nil 忽略）。
+func SetHostServiceLogger(l hclog.Logger) {
+	if l == nil {
+		return
+	}
+	hostServiceLogger = l
+}
+
+// warnJSON 记录 HostService 处理中 JSON 编解码失败，避免被 `_ =` 静默吞掉
+// （26-4）。调用方行为不变：尽力降级为空值并继续。
+func warnJSON(what string, err error) {
+	if err != nil {
+		hostServiceLogger.Warn("host service JSON 处理失败", "what", what, "err", err)
+	}
+}
+
+// requireIdentity 是控制面 HostService RPC 的最小鉴权：插件管理、会话/
+// Provider 控制、会话等待注册等会改动宿主生态或状态的操作必须绑定身份
+// （s.pluginID 非空）。宿主未设置身份时（SetCurrentHostPluginID /
+// BindHostServiceName 未生效）pluginID 为空，一律拒绝，防止匿名/未绑定身份
+// 插件接管宿主插件生态（26-2）。GetConfig/SetConfig 走更细粒度的名字隔离
+// （见其各自实现），不在此列。
+func (s *hostServiceServer) requireIdentity() error {
+	if s.pluginID == "" {
+		return status.Error(codes.PermissionDenied, "control-plane HostService RPC requires a bound plugin identity")
+	}
+	return nil
+}
+
+// dropPluginHostState 在插件连接关闭时清理该连接遗留的宿主侧状态：
+// hostServers 连接登记与 ChatLLM/CallAction 限流窗口，避免表只增不减
+// （26-3）。connKey 是 accept 时刻的 manifest id（hostServers 的 key）；
+// 若期间经 BindHostServiceName 更新了注册名，限流表还可能有注册名条目，
+// 一并清理。
+func dropPluginHostState(connKey string) {
+	if connKey == "" {
+		return
+	}
+	registered := ""
+	hostServersMu.Lock()
+	if s, ok := hostServers[connKey]; ok {
+		registered = s.pluginID
+		delete(hostServers, connKey)
+	}
+	hostServersMu.Unlock()
+	chatLLMRate.drop(connKey)
+	callActionRate.drop(connKey)
+	if registered != "" && registered != connKey {
+		chatLLMRate.drop(registered)
+		callActionRate.drop(registered)
+	}
+}
+
 // acceptHostService serves HostService on a broker listener so plugins can
 // dial back into the host. It returns the gRPC server and listener so the
 // caller can stop them when the plugin client is closed (prevents reload
 // leaks of the serving goroutine and listener socket).
-func acceptHostService(b *plugin.GRPCBroker, id uint32) (*grpc.Server, net.Listener, error) {
+func acceptHostService(b *plugin.GRPCBroker, id uint32) (*grpc.Server, net.Listener, *hostServiceServer, error) {
 	lis, err := b.Accept(id)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// 提高默认 4MB 消息上限：插件经 HostService 反向传大 chain_json
 	//（base64 图片/长对话）时不会因超限而失败。
@@ -369,9 +464,12 @@ func acceptHostService(b *plugin.GRPCBroker, id uint32) (*grpc.Server, net.Liste
 		grpc.MaxRecvMsgSize(maxGRPCMessageSize),
 		grpc.MaxSendMsgSize(maxGRPCMessageSize),
 	)
-	server := &hostServiceServer{pluginID: currentHostPluginID()}
+	// connKey 保留 accept 时刻的 manifest id（hostServers 表的 key），
+	// 供连接关闭时清理 hostServers/限流表残留（26-3）。
+	pid := currentHostPluginID()
+	server := &hostServiceServer{pluginID: pid, connKey: pid}
 	// 记录连接→插件 id，供 Register 后用注册名更新身份。
-	if pid := server.pluginID; pid != "" {
+	if pid != "" {
 		hostServersMu.Lock()
 		hostServers[pid] = server
 		hostServersMu.Unlock()
@@ -380,7 +478,7 @@ func acceptHostService(b *plugin.GRPCBroker, id uint32) (*grpc.Server, net.Liste
 	go func() {
 		_ = srv.Serve(lis)
 	}()
-	return srv, lis, nil
+	return srv, lis, server, nil
 }
 
 // hostServiceServer implements sdkv1.HostServiceServer on the host side,
@@ -389,7 +487,12 @@ func acceptHostService(b *plugin.GRPCBroker, id uint32) (*grpc.Server, net.Liste
 // connection was accepted, so reverse calls can be validated per-plugin.
 type hostServiceServer struct {
 	sdkv1.UnimplementedHostServiceServer
+	// pluginID 是当前连接身份：accept 时为 manifest id，Register 后由
+	// BindHostServiceName 更新为注册名（GetConfig/SetConfig 传的是注册名）。
 	pluginID string
+	// connKey 是 accept 时刻的 manifest id，hostServers 表以此作为 key；
+	// 连接关闭时用于清理 hostServers 与限流表条目（26-3）。
+	connKey string
 }
 
 // hostPluginID is the id of the plugin the host is currently establishing a
@@ -437,19 +540,26 @@ func BindHostServiceName(id, name string) {
 }
 
 func (s *hostServiceServer) CallAction(_ context.Context, req *sdkv1.CallActionRequest) (*sdkv1.CallActionResponse, error) {
+	// CallAction 是高频平台 API 入口，做与 ChatLLM 同款的窗口限流（26-6）。
+	if !callActionRate.allow(s.pluginID) {
+		return nil, status.Errorf(codes.ResourceExhausted, "插件 %q CallAction 调用过于频繁（每分钟上限 %d 次）", s.pluginID, callActionRate.maxPer)
+	}
 	h := getHostHooks()
 	if h.CallAction == nil {
 		return &sdkv1.CallActionResponse{}, nil
 	}
 	params := map[string]any{}
 	if len(req.ParamsJson) > 0 {
-		_ = json.Unmarshal(req.ParamsJson, &params)
+		warnJSON("CallAction params_json", json.Unmarshal(req.ParamsJson, &params))
 	}
 	result, err := h.CallAction(req.Platform, req.Api, params)
 	if err != nil {
 		return nil, err
 	}
-	out, _ := json.Marshal(result)
+	out, err := json.Marshal(result)
+	if err != nil {
+		return nil, err
+	}
 	return &sdkv1.CallActionResponse{ResultJson: out}, nil
 }
 
@@ -460,7 +570,7 @@ func (s *hostServiceServer) SendMessage(_ context.Context, req *sdkv1.SendMessag
 	}
 	var chain []Component
 	if len(req.ChainJson) > 0 {
-		_ = json.Unmarshal(req.ChainJson, &chain)
+		warnJSON("SendMessage chain_json", json.Unmarshal(req.ChainJson, &chain))
 	}
 	if err := h.SendMessage(req.Platform, req.SessionId, chain); err != nil {
 		return nil, err
@@ -494,7 +604,10 @@ func (s *hostServiceServer) GetConfig(_ context.Context, req *sdkv1.GetConfigReq
 	if err != nil {
 		return nil, err
 	}
-	out, _ := json.Marshal(cfg)
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
 	return &sdkv1.GetConfigResponse{ConfigJson: out}, nil
 }
 
@@ -509,7 +622,7 @@ func (s *hostServiceServer) SetConfig(_ context.Context, req *sdkv1.SetConfigReq
 	}
 	cfg := map[string]any{}
 	if len(req.ConfigJson) > 0 {
-		_ = json.Unmarshal(req.ConfigJson, &cfg)
+		warnJSON("SetConfig config_json", json.Unmarshal(req.ConfigJson, &cfg))
 	}
 	if err := h.SetConfig(req.PluginName, cfg); err != nil {
 		return nil, err
@@ -517,28 +630,71 @@ func (s *hostServiceServer) SetConfig(_ context.Context, req *sdkv1.SetConfigReq
 	return &sdkv1.Empty{}, nil
 }
 
-// chatLLMLimiter 对插件的 ChatLLM 反向调用做限流（每插件每分钟上限），
-// 防止恶意/失控插件无限调用宿主 LLM 消耗额度。
-func (s *hostServiceServer) chatLLMLimiter() bool {
-	if s.pluginID == "" {
-		return true // 未知身份（旧宿主未设置）不限流，保证兼容
+// rateWindow 记录某插件在一个固定窗口内的调用计数。
+type rateWindow struct {
+	window time.Time
+	count  int
+}
+
+// rateTable 是"插件→窗口计数"的限流表，用 pluginID 作为 key。只增不减会
+// 在插件频繁装卸/长期运行时持续累积（26-3），故提供 drop 供连接关闭时清理。
+// pluginID 空时（旧宿主未设置身份）不进行限流，保证兼容。
+type rateTable struct {
+	mu     sync.Mutex
+	maxPer int
+	table  map[string]rateWindow
+}
+
+// allow 返回本次调用是否放行，并推进窗口计数。
+func (r *rateTable) allow(id string) bool {
+	if id == "" || r == nil {
+		return true // 未知身份不限流，保证兼容
 	}
-	chatLLMRateMu.Lock()
-	defer chatLLMRateMu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	now := time.Now()
-	e := chatLLMRate[s.pluginID]
+	e := r.table[id]
 	if e.window.IsZero() || now.Sub(e.window) >= time.Minute {
 		e.window = now
 		e.count = 0
 	}
 	e.count++
-	chatLLMRate[s.pluginID] = e
-	return e.count <= maxChatLLMPerMinute
+	r.table[id] = e
+	return e.count <= r.maxPer
+}
+
+// drop 删除某插件 id 的限流条目，供连接关闭时清理（26-3）。
+func (r *rateTable) drop(id string) {
+	if r == nil || id == "" {
+		return
+	}
+	r.mu.Lock()
+	delete(r.table, id)
+	r.mu.Unlock()
+}
+
+// chatLLMRate 对插件的 ChatLLM 反向调用限流（每插件每分钟上限
+// maxChatLLMPerMinute），防止恶意/失控插件无限调用宿主 LLM 消耗额度。
+var chatLLMRate = &rateTable{maxPer: maxChatLLMPerMinute, table: map[string]rateWindow{}}
+
+// callActionRate 对插件的 CallAction 反向调用做同款限流（26-6）：CallAction
+// 是高频平台 API 入口，同样可能被滥用。
+var callActionRate = &rateTable{maxPer: maxChatLLMPerMinute, table: map[string]rateWindow{}}
+
+// SetChatLLMRateLimit 调整每插件每分钟 ChatLLM 反向调用上限（<=0 表示关闭
+// 限流），供宿主在启动前配置（26-6，原 maxChatLLMPerMinute 硬编码）。
+// 未调用时默认 30。返回设置前的旧值。
+func SetChatLLMRateLimit(perMinute int) int {
+	old := chatLLMRate.maxPer
+	if perMinute > 0 {
+		chatLLMRate.maxPer = perMinute
+	}
+	return old
 }
 
 func (s *hostServiceServer) ChatLLM(_ context.Context, req *sdkv1.ChatLLMRequest) (*sdkv1.ChatLLMResponse, error) {
-	if !s.chatLLMLimiter() {
-		return nil, status.Errorf(codes.ResourceExhausted, "插件 %q ChatLLM 调用过于频繁（每分钟上限 %d 次）", s.pluginID, maxChatLLMPerMinute)
+	if !chatLLMRate.allow(s.pluginID) {
+		return nil, status.Errorf(codes.ResourceExhausted, "插件 %q ChatLLM 调用过于频繁（每分钟上限 %d 次）", s.pluginID, chatLLMRate.maxPer)
 	}
 	h := getHostHooks()
 	if h.ChatLLM == nil {
@@ -596,7 +752,10 @@ func (s *hostServiceServer) GetConversation(_ context.Context, req *sdkv1.GetCon
 	if h.GetConversation == nil {
 		return &sdkv1.ConversationResponse{}, nil
 	}
-	out, _ := json.Marshal(h.GetConversation(req.UnifiedMsgOrigin, req.ConversationId, req.CreateIfNotExists))
+	out, err := json.Marshal(h.GetConversation(req.UnifiedMsgOrigin, req.ConversationId, req.CreateIfNotExists))
+	if err != nil {
+		return nil, err
+	}
 	return &sdkv1.ConversationResponse{ConversationJson: out}, nil
 }
 
@@ -607,13 +766,19 @@ func (s *hostServiceServer) GetConversations(_ context.Context, req *sdkv1.GetCo
 	}
 	resp := &sdkv1.ConversationsResponse{}
 	for _, c := range h.GetConversations(req.UnifiedMsgOrigin) {
-		out, _ := json.Marshal(c)
+		out, err := json.Marshal(c)
+		if err != nil {
+			return nil, err
+		}
 		resp.ConversationsJson = append(resp.ConversationsJson, out)
 	}
 	return resp, nil
 }
 
 func (s *hostServiceServer) DeleteConversation(_ context.Context, req *sdkv1.DeleteConversationRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
 	h := getHostHooks()
 	if h.DeleteConversation == nil {
 		return &sdkv1.Empty{}, nil
@@ -625,6 +790,9 @@ func (s *hostServiceServer) DeleteConversation(_ context.Context, req *sdkv1.Del
 }
 
 func (s *hostServiceServer) SwitchConversation(_ context.Context, req *sdkv1.SwitchConversationRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
 	h := getHostHooks()
 	if h.SwitchConversation == nil {
 		return &sdkv1.Empty{}, nil
@@ -647,6 +815,9 @@ func (s *hostServiceServer) UpdateConversationTitle(_ context.Context, req *sdkv
 }
 
 func (s *hostServiceServer) UpdateConversationPersonaID(_ context.Context, req *sdkv1.UpdateConversationPersonaRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
 	h := getHostHooks()
 	if h.UpdateConversationPersonaID == nil {
 		return &sdkv1.Empty{}, nil
@@ -666,7 +837,10 @@ func (s *hostServiceServer) GetPersonas(_ context.Context, _ *sdkv1.Empty) (*sdk
 	}
 	resp := &sdkv1.PersonasResponse{}
 	for _, p := range h.GetPersonas() {
-		out, _ := json.Marshal(p)
+		out, err := json.Marshal(p)
+		if err != nil {
+			return nil, err
+		}
 		resp.PersonasJson = append(resp.PersonasJson, out)
 	}
 	return resp, nil
@@ -677,7 +851,10 @@ func (s *hostServiceServer) GetDefaultPersona(_ context.Context, req *sdkv1.GetD
 	if h.GetDefaultPersona == nil {
 		return &sdkv1.PersonaResponse{}, nil
 	}
-	out, _ := json.Marshal(h.GetDefaultPersona(req.Umo))
+	out, err := json.Marshal(h.GetDefaultPersona(req.Umo))
+	if err != nil {
+		return nil, err
+	}
 	return &sdkv1.PersonaResponse{PersonaJson: out}, nil
 }
 
@@ -689,11 +866,17 @@ func (s *hostServiceServer) GetPersonaTree(_ context.Context, _ *sdkv1.Empty) (*
 	folders, personas := h.GetPersonaTree()
 	resp := &sdkv1.PersonaTreeResponse{}
 	for _, f := range folders {
-		out, _ := json.Marshal(f)
+		out, err := json.Marshal(f)
+		if err != nil {
+			return nil, err
+		}
 		resp.FoldersJson = append(resp.FoldersJson, out)
 	}
 	for _, p := range personas {
-		out, _ := json.Marshal(p)
+		out, err := json.Marshal(p)
+		if err != nil {
+			return nil, err
+		}
 		resp.PersonasJson = append(resp.PersonasJson, out)
 	}
 	return resp, nil
@@ -706,17 +889,17 @@ func (s *hostServiceServer) ResolveSelectedPersona(_ context.Context, req *sdkv1
 	}
 	settings := map[string]any{}
 	if len(req.ProviderSettingsJson) > 0 {
-		_ = json.Unmarshal(req.ProviderSettingsJson, &settings)
+		warnJSON("ResolveSelectedPersona provider_settings_json", json.Unmarshal(req.ProviderSettingsJson, &settings))
 	}
 	personaID, personaName, personaPrompt, forceApplied, isDefault := h.ResolveSelectedPersona(
 		req.Umo, req.ConversationPersonaId, req.PlatformName, settings,
 	)
 	return &sdkv1.ResolvePersonaResponse{
-		PersonaId:            personaID,
-		PersonaName:          personaName,
-		PersonaPrompt:        personaPrompt,
+		PersonaId:             personaID,
+		PersonaName:           personaName,
+		PersonaPrompt:         personaPrompt,
 		ForceAppliedPersonaId: forceApplied,
-		IsDefault:            isDefault,
+		IsDefault:             isDefault,
 	}, nil
 }
 
@@ -729,7 +912,10 @@ func (s *hostServiceServer) ListProviders(_ context.Context, req *sdkv1.ListProv
 	}
 	resp := &sdkv1.ProvidersResponse{}
 	for _, p := range h.ListProviders(req.Capability) {
-		out, _ := json.Marshal(p)
+		out, err := json.Marshal(p)
+		if err != nil {
+			return nil, err
+		}
 		resp.ProvidersJson = append(resp.ProvidersJson, out)
 	}
 	return resp, nil
@@ -740,11 +926,17 @@ func (s *hostServiceServer) GetUsingProvider(_ context.Context, req *sdkv1.GetUs
 	if h.GetUsingProvider == nil {
 		return &sdkv1.ProviderResponse{}, nil
 	}
-	out, _ := json.Marshal(h.GetUsingProvider(req.Umo, req.Capability))
+	out, err := json.Marshal(h.GetUsingProvider(req.Umo, req.Capability))
+	if err != nil {
+		return nil, err
+	}
 	return &sdkv1.ProviderResponse{ProviderJson: out}, nil
 }
 
 func (s *hostServiceServer) SetProvider(_ context.Context, req *sdkv1.SetProviderRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
 	h := getHostHooks()
 	if h.SetProvider == nil {
 		return &sdkv1.Empty{}, nil
@@ -772,7 +964,10 @@ func (s *hostServiceServer) ListStars(_ context.Context, _ *sdkv1.Empty) (*sdkv1
 	}
 	resp := &sdkv1.StarsResponse{}
 	for _, st := range h.ListStars() {
-		out, _ := json.Marshal(st)
+		out, err := json.Marshal(st)
+		if err != nil {
+			return nil, err
+		}
 		resp.StarsJson = append(resp.StarsJson, out)
 	}
 	return resp, nil
@@ -783,11 +978,17 @@ func (s *hostServiceServer) GetStar(_ context.Context, req *sdkv1.GetStarRequest
 	if h.GetStar == nil {
 		return &sdkv1.StarResponse{}, nil
 	}
-	out, _ := json.Marshal(h.GetStar(req.Name))
+	out, err := json.Marshal(h.GetStar(req.Name))
+	if err != nil {
+		return nil, err
+	}
 	return &sdkv1.StarResponse{StarJson: out}, nil
 }
 
 func (s *hostServiceServer) SetPluginEnabled(_ context.Context, req *sdkv1.SetPluginEnabledRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
 	h := getHostHooks()
 	if h.SetPluginEnabled == nil {
 		return &sdkv1.Empty{}, nil
@@ -799,6 +1000,9 @@ func (s *hostServiceServer) SetPluginEnabled(_ context.Context, req *sdkv1.SetPl
 }
 
 func (s *hostServiceServer) InstallPlugin(_ context.Context, req *sdkv1.InstallPluginRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
 	h := getHostHooks()
 	if h.InstallPlugin == nil {
 		return &sdkv1.Empty{}, nil
@@ -810,6 +1014,9 @@ func (s *hostServiceServer) InstallPlugin(_ context.Context, req *sdkv1.InstallP
 }
 
 func (s *hostServiceServer) UninstallPlugin(_ context.Context, req *sdkv1.UninstallPluginRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
 	h := getHostHooks()
 	if h.UninstallPlugin == nil {
 		return &sdkv1.Empty{}, nil
@@ -825,6 +1032,11 @@ func (s *hostServiceServer) UninstallPlugin(_ context.Context, req *sdkv1.Uninst
 // pluginName 从连接身份注入（s.pluginID，Register 后为注册名），宿主凭此
 // 关联等待与插件实例。
 func (s *hostServiceServer) RegisterSessionWait(_ context.Context, req *sdkv1.RegisterSessionWaitRequest) (*sdkv1.RegisterSessionWaitResponse, error) {
+	// 空身份时拒绝注册：宿主无法把等待归属到任何插件，避免记录无主等待
+	//（26-5）；同时归入控制面最小鉴权（26-2）。
+	if s.pluginID == "" {
+		return nil, status.Error(codes.FailedPrecondition, "cannot register session wait without a bound plugin identity")
+	}
 	h := getHostHooks()
 	if h.RegisterSessionWait == nil {
 		return &sdkv1.RegisterSessionWaitResponse{}, nil
@@ -843,13 +1055,6 @@ func (s *hostServiceServer) UnregisterSessionWait(_ context.Context, req *sdkv1.
 	return &sdkv1.Empty{}, nil
 }
 
-// maxChatLLMPerMinute 每插件每分钟 ChatLLM 反向调用上限。
+// maxChatLLMPerMinute 每插件每分钟 ChatLLM/CallAction 反向调用上限的默认值。
+// 宿主可在启动前经 SetChatLLMRateLimit 覆盖（26-6）。
 const maxChatLLMPerMinute = 30
-
-var (
-	chatLLMRateMu sync.Mutex
-	chatLLMRate   = map[string]struct {
-		window time.Time
-		count  int
-	}{}
-)

@@ -4,6 +4,14 @@ package sdk
 // SDK's register_* decorators (astrbot/api/event/filter) so a plugin author can
 // observe the same set of events regardless of language.
 //
+// NOTE: the Go SDK exposes a superset of the Python SDK's 14 hooks — it adds
+// on_message_received / on_pre_process / on_after_message_sent /
+// on_waiting_llm_request / on_result_handling / on_astrbot_loaded /
+// on_platform_loaded / on_plugin_loaded / on_plugin_unloaded / on_agent_begin /
+// on_agent_done and generic event-only hooks. When porting a plugin from
+// Python these extra observation points simply never fire; when porting TO
+// Python, drop any Go-only hook.
+//
 // Event-only hooks can also be declared with the generic Hook type (set Event
 // to one of these constants); the typed hook types below additionally carry
 // their payloads (LLMResponse / ToolCall / PluginError).
@@ -57,6 +65,9 @@ const (
 
 // LLMResponse is the model reply delivered to on_llm_response / on_agent_done
 // hooks. It is the serializable payload carried over HandleHook.
+//
+// JSON field names match the Python SDK's LLMResponse consumption
+// (astrbot/_bridge/dispatch.py reads "text").
 type LLMResponse struct {
 	// Text is the model's reply text.
 	Text string `json:"text"`
@@ -69,11 +80,16 @@ type LLMResponse struct {
 // ToolCall describes an LLM function tool invocation. It is the payload carried
 // over HandleHook for on_using_llm_tool (before execution) and
 // on_llm_tool_respond (after execution, with Result/IsError populated).
+//
+// JSON field names match the Python SDK's ToolCall dataclass
+// (astrbot/core/provider/entities.py) as consumed by its HandleHook
+// dispatcher (astrbot/_bridge/dispatch.py reads "tool_name"/"tool_args"), so a
+// payload produced here decodes identically in either a Go or a Python plugin.
 type ToolCall struct {
 	// Name is the tool name the model requested.
-	Name string `json:"name"`
+	Name string `json:"tool_name"`
 	// Args is the raw tool argument object.
-	Args map[string]any `json:"args,omitempty"`
+	Args map[string]any `json:"tool_args,omitempty"`
 	// Result is the tool's return text. Only set on on_llm_tool_respond.
 	Result string `json:"result,omitempty"`
 	// IsError reports whether the tool call failed. Only set on
@@ -83,6 +99,10 @@ type ToolCall struct {
 
 // PluginError describes a plugin handler failure. It is the payload carried
 // over HandleHook for on_plugin_error.
+//
+// JSON field names match the Python SDK's PluginError consumption
+// (astrbot/_bridge/dispatch.py reads "handler_name"/"error"); "plugin_name"
+// is Go-only extra info the Python dispatcher ignores.
 type PluginError struct {
 	// PluginName is the name of the plugin that failed.
 	PluginName string `json:"plugin_name"`

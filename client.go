@@ -3,9 +3,13 @@ package sdk
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
+	"os"
+	"time"
 
 	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
+	"github.com/hashicorp/go-hclog"
 	"google.golang.org/grpc"
 )
 
@@ -21,6 +25,38 @@ var rpcCallOpts = []grpc.CallOption{
 	grpc.MaxCallSendMsgSize(maxGRPCMessageSize),
 }
 
+// defaultRPCTimeout bounds host→plugin RPC calls (HandleCommand/HandleTool/
+// HandleHook/...) so a hung plugin cannot stall the host pipeline forever.
+// Callers that pass an already-deadlined context keep their own deadline.
+const defaultRPCTimeout = 30 * time.Second
+
+// withTimeout returns ctx unchanged when it already carries a deadline;
+// otherwise it returns a child context capped at defaultRPCTimeout. Always
+// call the returned cancel func.
+func withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, defaultRPCTimeout)
+}
+
+// logWarnf emits a WARNING line through the plugin's serviceLogger, falling
+// back to a stderr hclog logger when Serve has not created one yet. Used on
+// degraded-but-continue paths so failures are not silent.
+func logWarnf(format string, args ...any) {
+	logMu.Lock()
+	l := serviceLogger
+	logMu.Unlock()
+	if l == nil {
+		l = hclog.New(&hclog.LoggerOptions{
+			Name:   "astrbot-plugin-sdk",
+			Level:  hclog.Info,
+			Output: os.Stderr,
+		})
+	}
+	l.Warn(fmt.Sprintf(format, args...))
+}
+
 // Client is the host-side, typed wrapper around the plugin's gRPC service.
 // The host obtains it from go-plugin's Client() (see PluginServiceGRPCPlugin.GRPCClient).
 type Client struct {
@@ -32,6 +68,9 @@ type Client struct {
 	// does not leak the listener or its serving goroutine.
 	hostSrv *grpc.Server
 	hostLis net.Listener
+	// hostSrvServer 是 accept 时创建的 per-connection hostServiceServer；
+	// Close() 用它清理宿主侧的连接登记与限流表条目（26-3）。
+	hostSrvServer *hostServiceServer
 }
 
 // NewClient wraps an existing gRPC connection.
@@ -69,6 +108,8 @@ func normalizeResult(respResult *sdkv1.EventResult, legacySent, legacyStop, lega
 // never nil: `result.Sent` reports whether the plugin performed a send
 // operation (legacy plugins fall back to the response's `sent` field).
 func (c *Client) HandleCommand(ctx context.Context, name string, args []string, e *Event) (string, []Component, *sdkv1.EventResult, error) {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
 	ev, err := json.Marshal(e)
 	if err != nil {
 		return "", nil, &sdkv1.EventResult{}, err
@@ -94,6 +135,8 @@ func (c *Client) HandleCommand(ctx context.Context, name string, args []string, 
 // continue. The *EventResult is never nil: `result.Sent` reports whether the
 // plugin sent a message while running the filter (legacy fallback included).
 func (c *Client) HandleFilter(ctx context.Context, name string, e *Event) (bool, *sdkv1.EventResult, error) {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
 	ev, err := json.Marshal(e)
 	if err != nil {
 		return true, &sdkv1.EventResult{}, err
@@ -122,6 +165,8 @@ func (c *Client) HandleHookWithPayload(ctx context.Context, name string, e *Even
 }
 
 func (c *Client) handleHook(ctx context.Context, name string, e *Event, chain []Component, payload any) ([]Component, bool, *sdkv1.EventResult, error) {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
 	ev, err := json.Marshal(e)
 	if err != nil {
 		return chain, false, &sdkv1.EventResult{}, err
@@ -146,6 +191,10 @@ func (c *Client) handleHook(ctx context.Context, name string, e *Event, chain []
 		var out []Component
 		if err := json.Unmarshal(resp.ChainJson, &out); err == nil {
 			chain = out
+		} else {
+			// 解码失败时降级为原始 chain，但不再静默：打 warning 便于定位
+			// 插件侧输出损坏 chain_json 的钩子。
+			logWarnf("HandleHook(%q): 插件返回的 chain_json 解码失败，保留原始结果链: %v", name, err)
 		}
 	}
 	res := normalizeResult(resp.Result, resp.Sent, resp.Stop, resp.Handled)
@@ -156,6 +205,8 @@ func (c *Client) handleHook(ctx context.Context, name string, e *Event, chain []
 // modified) system prompt, the stop flag, and the EventResult (never nil;
 // `result.Sent` reports plugin sends, with legacy fallback).
 func (c *Client) HandleLLMRequest(ctx context.Context, name string, e *Event, systemPrompt, userPrompt string) (string, bool, *sdkv1.EventResult, error) {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
 	ev, err := json.Marshal(e)
 	if err != nil {
 		return systemPrompt, false, &sdkv1.EventResult{}, err
@@ -173,9 +224,6 @@ func (c *Client) HandleLLMRequest(ctx context.Context, name string, e *Event, sy
 	return resp.SystemPrompt, res.StopPropagation, res, nil
 }
 
-// HandleTool invokes a registered LLM function tool. The *EventResult is never
-// nil: `result.Sent` reports whether the plugin sent a message while running
-// the tool (legacy fallback included).
 // ListTools returns the plugin's current LLM function tools (pulled live:
 // plugin tools are registered during instantiation, after Register).
 func (c *Client) ListTools(ctx context.Context) ([]*sdkv1.ToolDesc, error) {
@@ -197,7 +245,12 @@ func (c *Client) GetConfigSchema(ctx context.Context) ([]byte, error) {
 	return resp.GetSchemaJson(), nil
 }
 
+// HandleTool invokes a registered LLM function tool. The *EventResult is never
+// nil: `result.Sent` reports whether the plugin sent a message while running
+// the tool (legacy fallback included).
 func (c *Client) HandleTool(ctx context.Context, name string, args map[string]any, e *Event) (string, bool, *sdkv1.EventResult, error) {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
 	ev, err := json.Marshal(e)
 	if err != nil {
 		return "", false, &sdkv1.EventResult{}, err
@@ -263,6 +316,12 @@ func (c *Client) Close() error {
 	if c == nil {
 		return nil
 	}
+	if c.hostSrvServer != nil {
+		// 清理该连接遗留的宿主侧状态（hostServers 登记 + 限流窗口），
+		// 避免表只增不减（26-3）。用 connKey（manifest id）清除。
+		dropPluginHostState(c.hostSrvServer.connKey)
+		c.hostSrvServer = nil
+	}
 	if c.hostSrv != nil {
 		c.hostSrv.Stop()
 		c.hostSrv = nil
@@ -278,10 +337,12 @@ func (c *Client) Close() error {
 }
 
 // setHostServiceServer records the HostService gRPC server + listener served
-// for this client so Close() can release them.
-func (c *Client) setHostServiceServer(srv *grpc.Server, lis net.Listener) {
+// for this client so Close() can release them, plus the per-connection server
+// so Close() can drop the plugin's host-side state (26-3).
+func (c *Client) setHostServiceServer(srv *grpc.Server, lis net.Listener, server *hostServiceServer) {
 	c.hostSrv = srv
 	c.hostLis = lis
+	c.hostSrvServer = server
 }
 
 // ConnTarget returns the gRPC connection target address (diagnostics).

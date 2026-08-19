@@ -1,5 +1,12 @@
 package sdk
 
+import (
+	"context"
+	"sync"
+
+	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
+)
+
 // Command is a message command a plugin accepts. The plugin author only has
 // to fill in the descriptor fields and the Handler.
 type Command struct {
@@ -7,8 +14,11 @@ type Command struct {
 	Aliases     []string
 	Description string
 	Usage       string
-	Permission  string // "everyone" (default) or "admin"
-	Handler     func(e *Event, args []string) (string, error)
+	// Permission restricts who may run the command: "everyone" (default) or
+	// "admin". The value is case-insensitive; anything else is normalized to
+	// "everyone" when the command is registered (see registry.drain).
+	Permission string
+	Handler    func(e *Event, args []string) (string, error)
 	// ChainHandler, when set, is preferred over Handler and lets the command
 	// return a full message chain (text + image + file components).
 	ChainHandler func(e *Event, args []string) ([]Component, error)
@@ -130,9 +140,16 @@ type Plugin struct {
 	// plugin startup.
 	OnLoad func() error
 	// OnConfig 目前仅供声明，SDK 尚未在运行时主动调用它（宿主端配置变更
-	// 暂不主动推送）。插件可通过 Host.GetConfig 主动读取配置。
+	// 暂不主动推送），属已知缺口（见 README/ROADMAP）。插件可通过
+	// Host.GetConfig 主动读取配置。
 	OnConfig func(cfg *Config) error
 	OnUnload func() error
+
+	// sessionWaitsMu 保护 sessionWaits 注册表。
+	sessionWaitsMu sync.Mutex
+	// sessionWaits 是按 unified_msg_origin 注册的会话等待。宿主收到该 umo
+	// 的下一条消息时经 PluginService.FeedSessionWait 推送，匹配到即触发。
+	sessionWaits map[string]*SessionWait
 }
 
 // Tool is an LLM function tool the plugin exposes to the model. When the model
@@ -188,4 +205,89 @@ type ResultHook struct {
 	Handler func(e *Event, chain []Component) ([]Component, error)
 	// Stop halts the pipeline after this hook runs.
 	Stop bool
+}
+
+// SessionWait represents a pending wait for the next message on a unified
+// message origin (umo). Registered via Plugin.RegisterSessionWait; the host
+// pushes the next matching event via PluginService.FeedSessionWait, which
+// triggers Handler once and removes the wait. Aligns with Python AstrBot's
+// session_waiter.
+type SessionWait struct {
+	// UMO is the unified message origin this wait listens on
+	// (e.g. "aiocqhttp:GroupMessage:123").
+	UMO string
+	// Handler consumes the matched event. Returning true marks the event as
+	// handled (consumed); false lets it fall through to normal handling.
+	Handler func(e *Event) bool
+}
+
+// RegisterSessionWait registers a wait for the next message on umo. The host
+// (via its session-wait registry) is asked to push matching events; when the
+// next event for umo arrives, Handler runs once and the wait is removed.
+// timeoutSec sets the wait's timeout on the host side (<=0 means no timeout /
+// host default). Returns the registered wait.
+func (p *Plugin) RegisterSessionWait(umo string, timeoutSec int, handler func(e *Event) bool) *SessionWait {
+	w := &SessionWait{UMO: umo, Handler: handler}
+	p.sessionWaitsMu.Lock()
+	if p.sessionWaits == nil {
+		p.sessionWaits = map[string]*SessionWait{}
+	}
+	p.sessionWaits[umo] = w
+	p.sessionWaitsMu.Unlock()
+
+	// 反向告知宿主注册等待；失败时仅日志（宿主不支持该特性时返回空 wait_id）。
+	if h := getHostHooks(); h.RegisterSessionWait != nil {
+		if svc, err := hostServiceClient(); err == nil {
+			_, _ = svc.RegisterSessionWait(context.Background(), &sdkv1.RegisterSessionWaitRequest{
+				Umo:            umo,
+				TimeoutSeconds: int32(timeoutSec),
+			})
+		}
+	}
+	return w
+}
+
+// UnregisterSessionWait removes a previously registered session wait for umo.
+func (p *Plugin) UnregisterSessionWait(umo string) {
+	p.sessionWaitsMu.Lock()
+	delete(p.sessionWaits, umo)
+	p.sessionWaitsMu.Unlock()
+	if h := getHostHooks(); h.UnregisterSessionWait != nil {
+		if svc, err := hostServiceClient(); err == nil {
+			_, _ = svc.UnregisterSessionWait(context.Background(), &sdkv1.UnregisterSessionWaitRequest{WaitId: umo})
+		}
+	}
+}
+
+// takeSessionWait removes and returns the registered wait for umo (one-shot:
+// a wait is consumed the first time it matches). Returns nil when no wait is
+// registered for umo.
+func (p *Plugin) takeSessionWait(umo string) *SessionWait {
+	p.sessionWaitsMu.Lock()
+	defer p.sessionWaitsMu.Unlock()
+	if p.sessionWaits == nil {
+		return nil
+	}
+	w := p.sessionWaits[umo]
+	if w == nil {
+		return nil
+	}
+	delete(p.sessionWaits, umo)
+	return w
+}
+
+// unifiedMsgOriginOf builds the plugin-facing unified message origin
+// ("<platform_id>:<message_type>:<conv_id>") from an event, used to match
+// session waits.
+func (p *Plugin) unifiedMsgOriginOf(e *Event) string {
+	if e == nil {
+		return ""
+	}
+	platform := e.GetPlatformID()
+	msgType := e.GetMessageType()
+	conv := e.ConvID
+	if platform == "" && msgType == "" && conv == "" {
+		return ""
+	}
+	return platform + ":" + msgType + ":" + conv
 }

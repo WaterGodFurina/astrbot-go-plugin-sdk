@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +52,11 @@ func Serve(p *Plugin) {
 	}
 	if p.OnLoad != nil {
 		if err := p.OnLoad(); err != nil {
+			// 与 python-sdk 的 STARTUP_ERROR 协议行一致：单行、可被宿主
+			// startup_error.go 解析并在 dashboard 展示失败原因（否则宿主
+			// 只能观察到子进程退出，无法定位）。
+			fmt.Fprintf(os.Stderr, "[ASTRBOT] STARTUP_ERROR phase=plugin_load type=%T plugin=%s error=%s\n",
+				err, p.Name, singleLine(err.Error()))
 			fmt.Fprintf(os.Stderr, "astrbot plugin %s OnLoad failed: %v\n", p.Name, err)
 			os.Exit(1)
 		}
@@ -84,10 +90,46 @@ var (
 	serviceLogger hclog.Logger
 )
 
+// singleLine collapses newlines/tabs in s so it can be embedded in the single
+// line [ASTRBOT] STARTUP_ERROR protocol output (mirrors python-sdk).
+func singleLine(s string) string {
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return strings.ReplaceAll(s, "\t", " ")
+}
+
 func setServiceLogger(l hclog.Logger) {
 	logMu.Lock()
 	serviceLogger = l
 	logMu.Unlock()
+}
+
+// logService returns the plugin's hclog logger (created in Serve) or a
+// throwaway stderr logger when it is not yet installed, so diagnostic lines
+// from serviceServer helpers always have somewhere to go.
+func logService() hclog.Logger {
+	logMu.Lock()
+	defer logMu.Unlock()
+	if serviceLogger != nil {
+		return serviceLogger
+	}
+	return hclog.New(&hclog.LoggerOptions{
+		Name:   "astrbot-plugin",
+		Level:  hclog.Info,
+		Output: os.Stderr,
+	})
+}
+
+// safeErr runs fn and converts a handler panic into an error (instead of
+// crashing the plugin process). Returns the panic value as an error with a
+// stack trace; on normal completion it returns fn's error.
+func safeErr(fn func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("handler panic: %v\n%s", r, debug.Stack())
+		}
+	}()
+	return fn()
 }
 
 // PluginServiceGRPCPlugin implements go-plugin's GRPCPlugin for the plugin
@@ -130,9 +172,9 @@ func (p *PluginServiceGRPCPlugin) GRPCServer(broker *plugin.GRPCBroker, s *grpc.
 func (p *PluginServiceGRPCPlugin) GRPCClient(ctx context.Context, broker *plugin.GRPCBroker, c *grpc.ClientConn) (any, error) {
 	client := NewClient(c)
 	if broker != nil {
-		srv, lis, err := acceptHostService(broker, HostServiceAppID)
+		srv, lis, server, err := acceptHostService(broker, HostServiceAppID)
 		if err == nil {
-			client.setHostServiceServer(srv, lis)
+			client.setHostServiceServer(srv, lis, server)
 		} else {
 			// 打 warn 日志：宿主端未能接受 HostService，插件将失去反向调用
 			// 能力（CallAction/SendMessage/GetConfig 等全部不可用）。只记录
@@ -284,7 +326,14 @@ func (s *serviceServer) HandleCommand(_ context.Context, req *sdkv1.HandleComman
 		}
 		resp := &sdkv1.HandleCommandResponse{Result: eventResult(true, false)}
 		if c.ChainHandler != nil {
-			chain, err := c.ChainHandler(e, req.Args)
+			var chain []Component
+			var err error
+			if cerr := safeErr(func() error {
+				chain, err = c.ChainHandler(e, req.Args)
+				return err
+			}); cerr != nil {
+				return nil, cerr
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -298,13 +347,21 @@ func (s *serviceServer) HandleCommand(_ context.Context, req *sdkv1.HandleComman
 		if c.Handler == nil {
 			return &sdkv1.HandleCommandResponse{}, nil
 		}
-		text, err := c.Handler(e, req.Args)
+		var text string
+		var err error
+		if cerr := safeErr(func() error {
+			text, err = c.Handler(e, req.Args)
+			return err
+		}); cerr != nil {
+			return nil, cerr
+		}
 		if err != nil {
 			return nil, err
 		}
 		resp.Text = text
 		return resp, nil
 	}
+	logService().Warn("HandleCommand: command not found", "name", req.Name)
 	return &sdkv1.HandleCommandResponse{}, nil
 }
 
@@ -321,17 +378,30 @@ func (s *serviceServer) HandleFilter(_ context.Context, req *sdkv1.HandleFilterR
 		if f.Handler == nil {
 			return &sdkv1.HandleFilterResponse{Allow: true}, nil
 		}
-		return &sdkv1.HandleFilterResponse{Allow: f.Handler(e), Result: eventResult(true, false)}, nil
+		var allow bool
+		if err := safeErr(func() error {
+			allow = f.Handler(e)
+			return nil
+		}); err != nil {
+			logService().Error("HandleFilter: handler panic", "name", req.Name, "error", err)
+			// 安全降级：拒绝继续传播（允许插件拦截事件）。
+			return &sdkv1.HandleFilterResponse{Allow: false, Result: eventResult(true, false)}, nil
+		}
+		return &sdkv1.HandleFilterResponse{Allow: allow, Result: eventResult(true, false)}, nil
 	}
 	return &sdkv1.HandleFilterResponse{Allow: true}, nil
 }
 
 // decodePayload unmarshals a JSON payload into out, tolerating empty input.
+// On corrupt (non-empty, non-decodable) input it logs a warning instead of
+// silently producing a zero-value out.
 func decodePayload(b []byte, out any) {
 	if len(b) == 0 {
 		return
 	}
-	_ = json.Unmarshal(b, out)
+	if err := json.Unmarshal(b, out); err != nil {
+		logService().Warn("decodePayload: invalid JSON payload, decoding to zero value", "error", err)
+	}
 }
 
 // HandleHook dispatches to a hook handler by name. Result hooks
@@ -372,9 +442,15 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if len(req.ChainJson) > 0 {
 			_ = json.Unmarshal(req.ChainJson, &chain)
 		}
-		chain, err := h.Handler(e, chain)
-		if err != nil {
+		var handlerErr error
+		if err := safeErr(func() error {
+			chain, handlerErr = h.Handler(e, chain)
+			return handlerErr
+		}); err != nil {
 			return nil, err
+		}
+		if handlerErr != nil {
+			return nil, handlerErr
 		}
 		chainJSON, err := json.Marshal(chain)
 		if err != nil {
@@ -396,7 +472,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		}
 		pl := &LLMResponse{}
 		decodePayload(req.PayloadJson, pl)
-		if err := h.Handler(e, pl); err != nil {
+		if err := safeErr(func() error { return h.Handler(e, pl) }); err != nil {
 			return nil, err
 		}
 		markHandled()
@@ -413,7 +489,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		}
 		call := &ToolCall{}
 		decodePayload(req.PayloadJson, call)
-		if err := h.Handler(e, call); err != nil {
+		if err := safeErr(func() error { return h.Handler(e, call) }); err != nil {
 			return nil, err
 		}
 		markHandled()
@@ -430,7 +506,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		}
 		call := &ToolCall{}
 		decodePayload(req.PayloadJson, call)
-		if err := h.Handler(e, call); err != nil {
+		if err := safeErr(func() error { return h.Handler(e, call) }); err != nil {
 			return nil, err
 		}
 		markHandled()
@@ -447,7 +523,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		}
 		pe := &PluginError{}
 		decodePayload(req.PayloadJson, pe)
-		if err := h.Handler(e, pe); err != nil {
+		if err := safeErr(func() error { return h.Handler(e, pe) }); err != nil {
 			return nil, err
 		}
 		markHandled()
@@ -463,7 +539,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 			return resp, nil
 		}
 		name := payloadString(req.PayloadJson)
-		if err := h.Handler(name); err != nil {
+		if err := safeErr(func() error { return h.Handler(name) }); err != nil {
 			return nil, err
 		}
 		markHandled()
@@ -476,7 +552,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if h.Handler == nil {
 			return resp, nil
 		}
-		if err := h.Handler(payloadString(req.PayloadJson)); err != nil {
+		if err := safeErr(func() error { return h.Handler(payloadString(req.PayloadJson)) }); err != nil {
 			return nil, err
 		}
 		markHandled()
@@ -489,7 +565,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if h.Handler == nil {
 			return resp, nil
 		}
-		if err := h.Handler(payloadString(req.PayloadJson)); err != nil {
+		if err := safeErr(func() error { return h.Handler(payloadString(req.PayloadJson)) }); err != nil {
 			return nil, err
 		}
 		markHandled()
@@ -502,7 +578,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if h.Handler == nil {
 			return resp, nil
 		}
-		if err := h.Handler(); err != nil {
+		if err := safeErr(func() error { return h.Handler() }); err != nil {
 			return nil, err
 		}
 		markHandled()
@@ -517,7 +593,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if h.Handler == nil {
 			return resp, nil
 		}
-		if err := h.Handler(e); err != nil {
+		if err := safeErr(func() error { return h.Handler(e) }); err != nil {
 			return nil, err
 		}
 		markHandled()
@@ -532,7 +608,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		}
 		pl := &LLMResponse{}
 		decodePayload(req.PayloadJson, pl)
-		if err := h.Handler(e, pl); err != nil {
+		if err := safeErr(func() error { return h.Handler(e, pl) }); err != nil {
 			return nil, err
 		}
 		markHandled()
@@ -547,7 +623,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if h.Handler == nil {
 			return resp, nil
 		}
-		if err := h.Handler(e); err != nil {
+		if err := safeErr(func() error { return h.Handler(e) }); err != nil {
 			return nil, err
 		}
 		markHandled()
@@ -562,7 +638,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if h.Handler == nil {
 			return resp, nil
 		}
-		if err := h.Handler(e); err != nil {
+		if err := safeErr(func() error { return h.Handler(e) }); err != nil {
 			return nil, err
 		}
 		markHandled()
@@ -575,7 +651,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if h.Handler == nil {
 			return resp, nil
 		}
-		if err := h.Handler(e); err != nil {
+		if err := safeErr(func() error { return h.Handler(e) }); err != nil {
 			return nil, err
 		}
 		markHandled()
@@ -589,7 +665,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		if h.Handler == nil {
 			return resp, nil
 		}
-		if err := h.Handler(e); err != nil {
+		if err := safeErr(func() error { return h.Handler(e) }); err != nil {
 			return nil, err
 		}
 		markHandled()
@@ -641,9 +717,15 @@ func (s *serviceServer) HandleLLMRequest(_ context.Context, req *sdkv1.HandleLLM
 			UserPrompt:   req.UserPrompt,
 			Extra:        e.Metadata,
 		}
-		pr, err := h.Handler(e, pr)
-		if err != nil {
+		var handlerErr error
+		if err := safeErr(func() error {
+			pr, handlerErr = h.Handler(e, pr)
+			return handlerErr
+		}); err != nil {
 			return nil, err
+		}
+		if handlerErr != nil {
+			return nil, handlerErr
 		}
 		if pr != nil {
 			resp.SystemPrompt = pr.SystemPrompt
@@ -700,7 +782,17 @@ func (s *serviceServer) HandleTool(_ context.Context, req *sdkv1.HandleToolReque
 		if t.Handler == nil {
 			return resp, nil
 		}
-		text, err := t.Handler(e, args)
+		var text string
+		var err error
+		if cerr := safeErr(func() error {
+			text, err = t.Handler(e, args)
+			return err
+		}); cerr != nil {
+			resp.Text = "工具 " + t.Name + " 执行异常: " + cerr.Error()
+			resp.IsError = true
+			resp.Result = eventResult(true, false)
+			return resp, nil
+		}
 		if err != nil {
 			resp.Text = "工具 " + t.Name + " 执行失败: " + err.Error()
 			resp.IsError = true
@@ -747,8 +839,52 @@ func (s *serviceServer) SetLogLevel(_ context.Context, req *sdkv1.SetLogLevelReq
 	return &sdkv1.Empty{}, nil
 }
 
+// GetConfigSchema returns the plugin's CURRENT config schema (JSON). The host
+// pulls it live (e.g. update_manager refreshes runtime schema) and falls back
+// to the Register snapshot when this is empty/unimplemented.
+func (s *serviceServer) GetConfigSchema(context.Context, *sdkv1.Empty) (*sdkv1.GetConfigSchemaResponse, error) {
+	var schema []byte
+	if s.impl != nil {
+		if b, err := json.Marshal(s.impl.ConfigSchema); err == nil {
+			schema = b
+		}
+	}
+	return &sdkv1.GetConfigSchemaResponse{SchemaJson: schema}, nil
+}
+
+// FeedSessionWait pushes an inbound message event into the plugin so a
+// registered session wait (SessionWait) for the event's unified message origin
+// can consume it. Returns handled=true when a wait matched and consumed the
+// event; otherwise false.
+func (s *serviceServer) FeedSessionWait(_ context.Context, req *sdkv1.FeedSessionWaitRequest) (*sdkv1.FeedSessionWaitResponse, error) {
+	if s.impl == nil {
+		return &sdkv1.FeedSessionWaitResponse{Handled: false}, nil
+	}
+	e := eventFromJSON(req.EventJson)
+	umo := s.impl.unifiedMsgOriginOf(e)
+	if umo == "" {
+		return &sdkv1.FeedSessionWaitResponse{Handled: false}, nil
+	}
+	if w := s.impl.takeSessionWait(umo); w != nil && w.Handler != nil {
+		handled := false
+		if err := safeErr(func() error {
+			handled = w.Handler(e)
+			return nil
+		}); err != nil {
+			logService().Error("FeedSessionWait: wait handler panic", "umo", umo, "error", err)
+			return &sdkv1.FeedSessionWaitResponse{Handled: false}, nil
+		}
+		return &sdkv1.FeedSessionWaitResponse{Handled: handled}, nil
+	}
+	return &sdkv1.FeedSessionWaitResponse{Handled: false}, nil
+}
+
 // webRoutePattern converts a plugin route like "/emoji/<category>" into a
-// regex with named groups; plain segments match exactly.
+// regex with named groups; plain segments match exactly. Only a whole segment
+// of the form "<name>" is treated as a placeholder; a segment like "<a>x" or
+// "a>b" is NOT a placeholder and is treated as a literal (aligned with
+// python-sdk). Such malformed segments are logged as a warning so the author
+// can spot the mistake.
 func webRoutePattern(route string) (*regexp.Regexp, []string, error) {
 	normalized := route
 	if !strings.HasPrefix(normalized, "/") {
@@ -762,14 +898,21 @@ func webRoutePattern(route string) (*regexp.Regexp, []string, error) {
 		if c == "" {
 			continue
 		}
-		m := re.FindStringSubmatch(c)
-		if len(m) == 2 {
-			name := m[1]
-			names = append(names, name)
-			pattern += "/" + regexp.QuoteMeta(re.ReplaceAllString(c, "")) + "([^/]+)"
-		} else {
+		// 整段必须是纯占位符 "<name>"（即 ^<[^>]+>$）才视为动态段；否则按
+		// 字面量转义，避免 <a>x 之类畸形段产生意外匹配。
+		placeholderRe := regexp.MustCompile(`^<[^>]+>$`)
+		if placeholderRe.MatchString(c) {
+			m := re.FindStringSubmatch(c)
+			if len(m) == 2 && m[1] != "" {
+				names = append(names, m[1])
+				pattern += "/([^/]+)"
+				continue
+			}
+			logService().Warn("webRoutePattern: 畸形占位符段，按字面量处理", "segment", c)
 			pattern += "/" + regexp.QuoteMeta(c)
+			continue
 		}
+		pattern += "/" + regexp.QuoteMeta(c)
 	}
 	if pattern == "" {
 		pattern = "/"
@@ -827,11 +970,21 @@ func (s *serviceServer) HandleWebRequest(_ context.Context, req *sdkv1.HandleWeb
 		if w.Handler == nil {
 			return resp, nil
 		}
-		status, respHeaders, body, err := w.Handler(method, path, query, headers, req.Body, pathParams)
-		if err != nil {
+		var status int
+		var respHeaders map[string]string
+		var body []byte
+		var handlerErr error
+		if cerr := safeErr(func() error {
+			status, respHeaders, body, handlerErr = w.Handler(method, path, query, headers, req.Body, pathParams)
+			return handlerErr
+		}); cerr != nil {
+			handlerErr = cerr
+		}
+		if handlerErr != nil {
+			errBody, _ := json.Marshal(map[string]string{"status": "error", "message": handlerErr.Error()})
 			return &sdkv1.HandleWebRequestResponse{
 				StatusCode: 500,
-				Body:       []byte(`{"status":"error","message":"` + err.Error() + `"}`),
+				Body:       errBody,
 			}, nil
 		}
 		out := &sdkv1.HandleWebRequestResponse{StatusCode: int32(status), Body: body}
@@ -858,6 +1011,7 @@ func eventFromJSON(b []byte) *Event {
 	}
 	var e Event
 	if err := json.Unmarshal(b, &e); err != nil {
+		logService().Warn("eventFromJSON: invalid event JSON, decoding to zero value", "error", err)
 		return &Event{}
 	}
 	return &e
