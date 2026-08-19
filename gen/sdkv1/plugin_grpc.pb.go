@@ -59,6 +59,7 @@ const (
 	PluginService_HealthCheck_FullMethodName      = "/astrbot.sdk.v1.PluginService/HealthCheck"
 	PluginService_SetLogLevel_FullMethodName      = "/astrbot.sdk.v1.PluginService/SetLogLevel"
 	PluginService_FeedSessionWait_FullMethodName  = "/astrbot.sdk.v1.PluginService/FeedSessionWait"
+	PluginService_GetConfigSchema_FullMethodName  = "/astrbot.sdk.v1.PluginService/GetConfigSchema"
 	PluginService_Cleanup_FullMethodName          = "/astrbot.sdk.v1.PluginService/Cleanup"
 )
 
@@ -105,6 +106,12 @@ type PluginServiceClient interface {
 	// a message arrives for a waiting umo. The plugin feeds it into
 	// SessionWaiter.trigger; if no wait matches it returns handled=false.
 	FeedSessionWait(ctx context.Context, in *FeedSessionWaitRequest, opts ...grpc.CallOption) (*FeedSessionWaitResponse, error)
+	// GetConfigSchema returns the plugin's CURRENT config schema (JSON), which
+	// plugins may refresh at runtime (e.g. update_manager fills plugin-list
+	// dropdown options in __init__). Aligns with Python AstrBot's WebUI reading
+	// the live star instance config.schema. Host falls back to the Register
+	// snapshot when this RPC is unimplemented/empty.
+	GetConfigSchema(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*GetConfigSchemaResponse, error)
 	// Cleanup is called when the host unloads the plugin.
 	Cleanup(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
 }
@@ -227,6 +234,16 @@ func (c *pluginServiceClient) FeedSessionWait(ctx context.Context, in *FeedSessi
 	return out, nil
 }
 
+func (c *pluginServiceClient) GetConfigSchema(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*GetConfigSchemaResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetConfigSchemaResponse)
+	err := c.cc.Invoke(ctx, PluginService_GetConfigSchema_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *pluginServiceClient) Cleanup(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Empty)
@@ -280,6 +297,12 @@ type PluginServiceServer interface {
 	// a message arrives for a waiting umo. The plugin feeds it into
 	// SessionWaiter.trigger; if no wait matches it returns handled=false.
 	FeedSessionWait(context.Context, *FeedSessionWaitRequest) (*FeedSessionWaitResponse, error)
+	// GetConfigSchema returns the plugin's CURRENT config schema (JSON), which
+	// plugins may refresh at runtime (e.g. update_manager fills plugin-list
+	// dropdown options in __init__). Aligns with Python AstrBot's WebUI reading
+	// the live star instance config.schema. Host falls back to the Register
+	// snapshot when this RPC is unimplemented/empty.
+	GetConfigSchema(context.Context, *Empty) (*GetConfigSchemaResponse, error)
 	// Cleanup is called when the host unloads the plugin.
 	Cleanup(context.Context, *Empty) (*Empty, error)
 	mustEmbedUnimplementedPluginServiceServer()
@@ -324,6 +347,9 @@ func (UnimplementedPluginServiceServer) SetLogLevel(context.Context, *SetLogLeve
 }
 func (UnimplementedPluginServiceServer) FeedSessionWait(context.Context, *FeedSessionWaitRequest) (*FeedSessionWaitResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method FeedSessionWait not implemented")
+}
+func (UnimplementedPluginServiceServer) GetConfigSchema(context.Context, *Empty) (*GetConfigSchemaResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetConfigSchema not implemented")
 }
 func (UnimplementedPluginServiceServer) Cleanup(context.Context, *Empty) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Cleanup not implemented")
@@ -547,6 +573,24 @@ func _PluginService_FeedSessionWait_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PluginService_GetConfigSchema_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).GetConfigSchema(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_GetConfigSchema_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).GetConfigSchema(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _PluginService_Cleanup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(Empty)
 	if err := dec(in); err != nil {
@@ -615,6 +659,10 @@ var PluginService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FeedSessionWait",
 			Handler:    _PluginService_FeedSessionWait_Handler,
+		},
+		{
+			MethodName: "GetConfigSchema",
+			Handler:    _PluginService_GetConfigSchema_Handler,
 		},
 		{
 			MethodName: "Cleanup",

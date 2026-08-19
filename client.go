@@ -186,6 +186,17 @@ func (c *Client) ListTools(ctx context.Context) ([]*sdkv1.ToolDesc, error) {
 	return resp.GetTools(), nil
 }
 
+// GetConfigSchema returns the plugin's CURRENT config schema (JSON), which
+// plugins may refresh at runtime. The host falls back to the Register snapshot
+// when this RPC is unimplemented/empty.
+func (c *Client) GetConfigSchema(ctx context.Context) ([]byte, error) {
+	resp, err := c.svc.GetConfigSchema(ctx, &sdkv1.Empty{}, rpcCallOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetSchemaJson(), nil
+}
+
 func (c *Client) HandleTool(ctx context.Context, name string, args map[string]any, e *Event) (string, bool, *sdkv1.EventResult, error) {
 	ev, err := json.Marshal(e)
 	if err != nil {
