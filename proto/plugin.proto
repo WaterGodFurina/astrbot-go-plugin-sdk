@@ -100,6 +100,9 @@ service HostService {
   // TextToImage renders text into an image (host t2i engine) and returns the
   // PNG bytes (base64). The plugin can then send it as an Image component.
   rpc TextToImage(TextToImageRequest) returns (TextToImageResponse);
+  // HtmlRender renders an HTML template + data into an image via the host
+  // (t2i remote preferred, local gg fallback). Returns PNG bytes (base64).
+  rpc HtmlRender(HtmlRenderRequest) returns (HtmlRenderResponse);
 
   // ── 会话管理（对齐 Python AstrBot conversation_manager）──
   // 取会话当前 ID（umo 无会话时返回空串）。
@@ -469,6 +472,20 @@ message TextToImageRequest {
 
 message TextToImageResponse {
   // PNG image bytes, base64-encoded (no data: prefix).
+  string image_base64 = 1;
+}
+
+message HtmlRenderRequest {
+  // HTML/Jinja2 模板字符串。
+  string template = 1;
+  // 模板数据 JSON 字符串。
+  string data = 2;
+  // 渲染选项 JSON 字符串（如 {"type":"png","full_page":true}）。
+  string options = 3;
+}
+
+message HtmlRenderResponse {
+  // PNG bytes base64（无 data: 前缀）。
   string image_base64 = 1;
 }
 

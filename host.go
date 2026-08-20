@@ -283,6 +283,26 @@ func (h *host) TextToImage(text, templateName string) (string, error) {
 	return resp.ImageBase64, nil
 }
 
+// HtmlRender renders an HTML template + data into an image via the host
+// (t2i remote preferred, local gg fallback), returning base64-encoded PNG bytes.
+func (h *host) HtmlRender(template, data, options string) (string, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.HtmlRender(ctx, &sdkv1.HtmlRenderRequest{
+		Template: template,
+		Data:     data,
+		Options:  options,
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.ImageBase64, nil
+}
+
 // ---------------------------------------------------------------------------
 // Host side: serving the HostService over the broker.
 // ---------------------------------------------------------------------------
@@ -307,6 +327,9 @@ type HostServiceHooks struct {
 	React func(platform, sessionID, messageID, emoji string) error
 	// TextToImage renders text into an image, returning base64 PNG bytes.
 	TextToImage func(text, templateName string) (string, error)
+	// HtmlRender renders an HTML template + data into an image (t2i remote
+	// preferred, local gg fallback), returning base64 PNG bytes.
+	HtmlRender func(template, data, options string) (string, error)
 
 	// ── 会话管理（对齐 Python conversation_manager）──
 	// GetCurrConversationID 返回 umo 的当前会话 ID（无会话返回 ""）。
@@ -727,6 +750,19 @@ func (s *hostServiceServer) TextToImage(_ context.Context, req *sdkv1.TextToImag
 		return nil, err
 	}
 	return &sdkv1.TextToImageResponse{ImageBase64: b64}, nil
+}
+
+// HtmlRender renders an HTML template + data into an image via the host.
+func (s *hostServiceServer) HtmlRender(_ context.Context, req *sdkv1.HtmlRenderRequest) (*sdkv1.HtmlRenderResponse, error) {
+	h := getHostHooks()
+	if h.HtmlRender == nil {
+		return &sdkv1.HtmlRenderResponse{}, nil
+	}
+	b64, err := h.HtmlRender(req.Template, req.Data, req.Options)
+	if err != nil {
+		return nil, err
+	}
+	return &sdkv1.HtmlRenderResponse{ImageBase64: b64}, nil
 }
 
 // ── 会话管理 RPC 实现 ──────────────────────────────────────────────────────

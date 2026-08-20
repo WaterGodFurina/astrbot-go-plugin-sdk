@@ -682,6 +682,7 @@ const (
 	HostService_ChatLLM_FullMethodName                     = "/astrbot.sdk.v1.HostService/ChatLLM"
 	HostService_React_FullMethodName                       = "/astrbot.sdk.v1.HostService/React"
 	HostService_TextToImage_FullMethodName                 = "/astrbot.sdk.v1.HostService/TextToImage"
+	HostService_HtmlRender_FullMethodName                  = "/astrbot.sdk.v1.HostService/HtmlRender"
 	HostService_GetCurrConversationID_FullMethodName       = "/astrbot.sdk.v1.HostService/GetCurrConversationID"
 	HostService_NewConversation_FullMethodName             = "/astrbot.sdk.v1.HostService/NewConversation"
 	HostService_GetConversation_FullMethodName             = "/astrbot.sdk.v1.HostService/GetConversation"
@@ -730,6 +731,9 @@ type HostServiceClient interface {
 	// TextToImage renders text into an image (host t2i engine) and returns the
 	// PNG bytes (base64). The plugin can then send it as an Image component.
 	TextToImage(ctx context.Context, in *TextToImageRequest, opts ...grpc.CallOption) (*TextToImageResponse, error)
+	// HtmlRender renders an HTML template + data into an image via the host
+	// (t2i remote preferred, local gg fallback). Returns PNG bytes (base64).
+	HtmlRender(ctx context.Context, in *HtmlRenderRequest, opts ...grpc.CallOption) (*HtmlRenderResponse, error)
 	// ── 会话管理（对齐 Python AstrBot conversation_manager）──
 	// 取会话当前 ID（umo 无会话时返回空串）。
 	GetCurrConversationID(ctx context.Context, in *ConversationIDRequest, opts ...grpc.CallOption) (*ConversationIDResponse, error)
@@ -866,6 +870,16 @@ func (c *hostServiceClient) TextToImage(ctx context.Context, in *TextToImageRequ
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TextToImageResponse)
 	err := c.cc.Invoke(ctx, HostService_TextToImage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) HtmlRender(ctx context.Context, in *HtmlRenderRequest, opts ...grpc.CallOption) (*HtmlRenderResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HtmlRenderResponse)
+	err := c.cc.Invoke(ctx, HostService_HtmlRender_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1125,6 +1139,9 @@ type HostServiceServer interface {
 	// TextToImage renders text into an image (host t2i engine) and returns the
 	// PNG bytes (base64). The plugin can then send it as an Image component.
 	TextToImage(context.Context, *TextToImageRequest) (*TextToImageResponse, error)
+	// HtmlRender renders an HTML template + data into an image via the host
+	// (t2i remote preferred, local gg fallback). Returns PNG bytes (base64).
+	HtmlRender(context.Context, *HtmlRenderRequest) (*HtmlRenderResponse, error)
 	// ── 会话管理（对齐 Python AstrBot conversation_manager）──
 	// 取会话当前 ID（umo 无会话时返回空串）。
 	GetCurrConversationID(context.Context, *ConversationIDRequest) (*ConversationIDResponse, error)
@@ -1210,6 +1227,9 @@ func (UnimplementedHostServiceServer) React(context.Context, *ReactRequest) (*Em
 }
 func (UnimplementedHostServiceServer) TextToImage(context.Context, *TextToImageRequest) (*TextToImageResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method TextToImage not implemented")
+}
+func (UnimplementedHostServiceServer) HtmlRender(context.Context, *HtmlRenderRequest) (*HtmlRenderResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method HtmlRender not implemented")
 }
 func (UnimplementedHostServiceServer) GetCurrConversationID(context.Context, *ConversationIDRequest) (*ConversationIDResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetCurrConversationID not implemented")
@@ -1441,6 +1461,24 @@ func _HostService_TextToImage_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(HostServiceServer).TextToImage(ctx, req.(*TextToImageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_HtmlRender_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HtmlRenderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).HtmlRender(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_HtmlRender_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).HtmlRender(ctx, req.(*HtmlRenderRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1897,6 +1935,10 @@ var HostService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "TextToImage",
 			Handler:    _HostService_TextToImage_Handler,
+		},
+		{
+			MethodName: "HtmlRender",
+			Handler:    _HostService_HtmlRender_Handler,
 		},
 		{
 			MethodName: "GetCurrConversationID",
