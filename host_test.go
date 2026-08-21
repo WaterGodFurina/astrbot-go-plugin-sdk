@@ -68,3 +68,13 @@ func TestBindHostServiceName(t *testing.T) {
 	delete(hostServers, "astrbot_plugin_jm_cosmos")
 	hostServersMu.Unlock()
 }
+
+// TestRegisterBridgeHookAnonymousRejected 验证匿名（无绑定身份）插件注册
+// 桥接钩子被拒。
+func TestRegisterBridgeHookAnonymousRejected(t *testing.T) {
+	srv := &hostServiceServer{pluginID: ""}
+	_, err := srv.RegisterBridgeHook(context.Background(), &sdkv1.BridgeHookRequest{HookName: "hook"})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("anonymous RegisterBridgeHook: want FailedPrecondition, got %v", err)
+	}
+}

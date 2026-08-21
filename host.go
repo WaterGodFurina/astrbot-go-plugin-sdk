@@ -227,24 +227,33 @@ func (h *host) SetConfig(pluginName string, cfg map[string]any) error {
 	return err
 }
 
-// ChatLLM calls the host's default chat LLM provider with the given prompt and
-// returns the model's reply text. It does not execute tool calls.
-func (h *host) ChatLLM(prompt, systemPrompt string, imageURLs []string) (string, error) {
+// ChatLLMFull calls the host's chat LLM provider with the full request
+// (prompt, system prompt, image/audio URLs, tools, contexts, provider id)
+// and returns the model's reply text. It is the zero-copy entry point; the
+// request pointer is passed through directly.
+func (h *host) ChatLLMFull(req *sdkv1.ChatLLMRequest) (string, error) {
 	svc, err := hostServiceClient()
 	if err != nil {
 		return "", err
 	}
 	ctx, cancel := hostRPCCtx()
 	defer cancel()
-	resp, err := svc.ChatLLM(ctx, &sdkv1.ChatLLMRequest{
-		Prompt:       prompt,
-		SystemPrompt: systemPrompt,
-		ImageUrls:    imageURLs,
-	})
+	resp, err := svc.ChatLLM(ctx, req)
 	if err != nil {
 		return "", err
 	}
 	return resp.Text, nil
+}
+
+// ChatLLM calls the host's default chat LLM provider with the given prompt and
+// returns the model's reply text. It does not execute tool calls. Kept as a
+// thin wrapper over ChatLLMFull so existing plugin callers stay unchanged.
+func (h *host) ChatLLM(prompt, systemPrompt string, imageURLs []string) (string, error) {
+	return h.ChatLLMFull(&sdkv1.ChatLLMRequest{
+		Prompt:       prompt,
+		SystemPrompt: systemPrompt,
+		ImageUrls:    imageURLs,
+	})
 }
 
 // React adds an emoji reaction to a message on a platform adapter.
@@ -303,6 +312,32 @@ func (h *host) HtmlRender(template, data, options string) (string, error) {
 	return resp.ImageBase64, nil
 }
 
+// RegisterBridgeHook 告知宿主：本插件经"桥接钩子"接收入站消息（botpy/
+// telegram 等兼容层用）。宿主收到入站消息时会把序列化事件推给该插件的
+// HandleHook(name=hookName)。返回 nil 表示注册成功。
+func (h *host) RegisterBridgeHook(hookName string) error {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	_, err = svc.RegisterBridgeHook(ctx, &sdkv1.BridgeHookRequest{HookName: hookName})
+	return err
+}
+
+// UnregisterBridgeHook 注销桥接钩子，宿主不再推送入站消息。
+func (h *host) UnregisterBridgeHook(hookName string) error {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	_, err = svc.UnregisterBridgeHook(ctx, &sdkv1.BridgeHookRequest{HookName: hookName})
+	return err
+}
+
 // ---------------------------------------------------------------------------
 // Host side: serving the HostService over the broker.
 // ---------------------------------------------------------------------------
@@ -320,9 +355,10 @@ type HostServiceHooks struct {
 	GetConfig func(pluginName string) (map[string]any, error)
 	// SetConfig persists the plugin's full config map.
 	SetConfig func(pluginName string, cfg map[string]any) error
-	// ChatLLM calls the default chat provider with prompt + system prompt.
-	// imageURLs (may be nil) are appended as multimodal content parts.
-	ChatLLM func(prompt, systemPrompt string, imageURLs []string) (string, error)
+	// ChatLLM calls the default chat provider with the full request. It
+	// receives the request pointer directly (zero-copy passthrough) so the
+	// host can consume audio_urls/tools_json/contexts_json/provider_id.
+	ChatLLM func(req *sdkv1.ChatLLMRequest) (string, error)
 	// React adds an emoji reaction to a message on a platform.
 	React func(platform, sessionID, messageID, emoji string) error
 	// TextToImage renders text into an image, returning base64 PNG bytes.
@@ -389,6 +425,14 @@ type HostServiceHooks struct {
 	RegisterSessionWait func(pluginName, umo string, timeoutSeconds int32) string
 	// UnregisterSessionWait 注销等待。
 	UnregisterSessionWait func(waitID string)
+
+	// ── 桥接钩子（botpy/telegram 等兼容层）──
+	// RegisterBridgeHook 注册插件的桥接钩子，宿主收到入站消息时把序列化事件
+	// 推给该插件的 HandleHook(name=hookName)。pluginName 由 SDK 侧从连接身份
+	// 注入。
+	RegisterBridgeHook func(pluginName, hookName string) error
+	// UnregisterBridgeHook 注销桥接钩子。
+	UnregisterBridgeHook func(pluginName, hookName string) error
 }
 
 var (
@@ -723,7 +767,7 @@ func (s *hostServiceServer) ChatLLM(_ context.Context, req *sdkv1.ChatLLMRequest
 	if h.ChatLLM == nil {
 		return &sdkv1.ChatLLMResponse{}, nil
 	}
-	text, err := h.ChatLLM(req.Prompt, req.SystemPrompt, req.ImageUrls)
+	text, err := h.ChatLLM(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1088,6 +1132,36 @@ func (s *hostServiceServer) UnregisterSessionWait(_ context.Context, req *sdkv1.
 		return &sdkv1.Empty{}, nil
 	}
 	h.UnregisterSessionWait(req.WaitId)
+	return &sdkv1.Empty{}, nil
+}
+
+// RegisterBridgeHook 注册插件到宿主的桥接钩子（botpy/telegram 等兼容层）。
+// pluginName 从连接身份注入（s.pluginID），宿主凭此关联钩子与插件实例。
+// 空身份时拒绝（对齐 RegisterSessionWait 的控制面最小鉴权），避免登记无主
+// 钩子。
+func (s *hostServiceServer) RegisterBridgeHook(_ context.Context, req *sdkv1.BridgeHookRequest) (*sdkv1.Empty, error) {
+	if s.pluginID == "" {
+		return nil, status.Error(codes.FailedPrecondition, "cannot register bridge hook without a bound plugin identity")
+	}
+	h := getHostHooks()
+	if h.RegisterBridgeHook == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	if err := h.RegisterBridgeHook(s.pluginID, req.HookName); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
+}
+
+// UnregisterBridgeHook 注销插件到宿主的桥接钩子。
+func (s *hostServiceServer) UnregisterBridgeHook(_ context.Context, req *sdkv1.BridgeHookRequest) (*sdkv1.Empty, error) {
+	h := getHostHooks()
+	if h.UnregisterBridgeHook == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	if err := h.UnregisterBridgeHook(s.pluginID, req.HookName); err != nil {
+		return nil, err
+	}
 	return &sdkv1.Empty{}, nil
 }
 

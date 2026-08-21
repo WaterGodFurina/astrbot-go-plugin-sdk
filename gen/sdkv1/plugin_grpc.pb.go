@@ -706,6 +706,8 @@ const (
 	HostService_UninstallPlugin_FullMethodName             = "/astrbot.sdk.v1.HostService/UninstallPlugin"
 	HostService_RegisterSessionWait_FullMethodName         = "/astrbot.sdk.v1.HostService/RegisterSessionWait"
 	HostService_UnregisterSessionWait_FullMethodName       = "/astrbot.sdk.v1.HostService/UnregisterSessionWait"
+	HostService_RegisterBridgeHook_FullMethodName          = "/astrbot.sdk.v1.HostService/RegisterBridgeHook"
+	HostService_UnregisterBridgeHook_FullMethodName        = "/astrbot.sdk.v1.HostService/UnregisterBridgeHook"
 )
 
 // HostServiceClient is the client API for HostService service.
@@ -786,6 +788,9 @@ type HostServiceClient interface {
 	RegisterSessionWait(ctx context.Context, in *RegisterSessionWaitRequest, opts ...grpc.CallOption) (*RegisterSessionWaitResponse, error)
 	// 插件注销等待（会话结束/超时）。
 	UnregisterSessionWait(ctx context.Context, in *UnregisterSessionWaitRequest, opts ...grpc.CallOption) (*Empty, error)
+	// ── 桥接钩子（botpy/telegram 等兼容层）──
+	RegisterBridgeHook(ctx context.Context, in *BridgeHookRequest, opts ...grpc.CallOption) (*Empty, error)
+	UnregisterBridgeHook(ctx context.Context, in *BridgeHookRequest, opts ...grpc.CallOption) (*Empty, error)
 }
 
 type hostServiceClient struct {
@@ -1116,6 +1121,26 @@ func (c *hostServiceClient) UnregisterSessionWait(ctx context.Context, in *Unreg
 	return out, nil
 }
 
+func (c *hostServiceClient) RegisterBridgeHook(ctx context.Context, in *BridgeHookRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_RegisterBridgeHook_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) UnregisterBridgeHook(ctx context.Context, in *BridgeHookRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_UnregisterBridgeHook_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // HostServiceServer is the server API for HostService service.
 // All implementations must embed UnimplementedHostServiceServer
 // for forward compatibility.
@@ -1194,6 +1219,9 @@ type HostServiceServer interface {
 	RegisterSessionWait(context.Context, *RegisterSessionWaitRequest) (*RegisterSessionWaitResponse, error)
 	// 插件注销等待（会话结束/超时）。
 	UnregisterSessionWait(context.Context, *UnregisterSessionWaitRequest) (*Empty, error)
+	// ── 桥接钩子（botpy/telegram 等兼容层）──
+	RegisterBridgeHook(context.Context, *BridgeHookRequest) (*Empty, error)
+	UnregisterBridgeHook(context.Context, *BridgeHookRequest) (*Empty, error)
 	mustEmbedUnimplementedHostServiceServer()
 }
 
@@ -1299,6 +1327,12 @@ func (UnimplementedHostServiceServer) RegisterSessionWait(context.Context, *Regi
 }
 func (UnimplementedHostServiceServer) UnregisterSessionWait(context.Context, *UnregisterSessionWaitRequest) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method UnregisterSessionWait not implemented")
+}
+func (UnimplementedHostServiceServer) RegisterBridgeHook(context.Context, *BridgeHookRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RegisterBridgeHook not implemented")
+}
+func (UnimplementedHostServiceServer) UnregisterBridgeHook(context.Context, *BridgeHookRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UnregisterBridgeHook not implemented")
 }
 func (UnimplementedHostServiceServer) mustEmbedUnimplementedHostServiceServer() {}
 func (UnimplementedHostServiceServer) testEmbeddedByValue()                     {}
@@ -1897,6 +1931,42 @@ func _HostService_UnregisterSessionWait_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HostService_RegisterBridgeHook_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BridgeHookRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).RegisterBridgeHook(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_RegisterBridgeHook_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).RegisterBridgeHook(ctx, req.(*BridgeHookRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_UnregisterBridgeHook_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BridgeHookRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).UnregisterBridgeHook(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_UnregisterBridgeHook_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).UnregisterBridgeHook(ctx, req.(*BridgeHookRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // HostService_ServiceDesc is the grpc.ServiceDesc for HostService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2031,6 +2101,14 @@ var HostService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UnregisterSessionWait",
 			Handler:    _HostService_UnregisterSessionWait_Handler,
+		},
+		{
+			MethodName: "RegisterBridgeHook",
+			Handler:    _HostService_RegisterBridgeHook_Handler,
+		},
+		{
+			MethodName: "UnregisterBridgeHook",
+			Handler:    _HostService_UnregisterBridgeHook_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
