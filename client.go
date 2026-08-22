@@ -274,6 +274,8 @@ func (c *Client) HandleTool(ctx context.Context, name string, args map[string]an
 // Web API (the host proxies /api/plug/<plugin>/<path> here). Returns the
 // response status, headers and body.
 func (c *Client) HandleWebRequest(ctx context.Context, req *sdkv1.HandleWebRequestRequest) (*sdkv1.HandleWebRequestResponse, error) {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
 	return c.svc.HandleWebRequest(ctx, req, rpcCallOpts...)
 }
 
@@ -302,6 +304,8 @@ func (c *Client) SetLogLevel(ctx context.Context, level string) error {
 // wait consumed the event. Old plugin binaries return UNIMPLEMENTED; the
 // caller should treat that as handled=false (no wait registered).
 func (c *Client) FeedSessionWait(ctx context.Context, eventJSON []byte) (bool, error) {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
 	resp, err := c.svc.FeedSessionWait(ctx, &sdkv1.FeedSessionWaitRequest{EventJson: eventJSON}, rpcCallOpts...)
 	if err != nil {
 		return false, err

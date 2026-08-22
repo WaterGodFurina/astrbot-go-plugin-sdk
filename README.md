@@ -78,6 +78,17 @@ sdk.RegisterCommand(sdk.Command{
 sdk.Command{Name: "admin-cmd", Permission: "admin", Handler: ...}
 ```
 
+### 子指令（命令分组）
+
+`ParentGroup` + `IsSubCommand` 可把命令挂到某个命令组下作为子指令（`ParentGroup` 为空表示顶层命令）。宿主侧会按组聚合展示/匹配：
+
+```go
+// 组命令本身照常声明
+sdk.Command{Name: "weather", Description: "天气相关", Handler: ...}
+// 子指令：归属 weather 组
+sdk.Command{Name: "now", ParentGroup: "weather", IsSubCommand: true, Handler: ...}
+```
+
 ## 过滤器
 
 过滤器返回 `false` 时拦截该事件（不再进入后续管线）：

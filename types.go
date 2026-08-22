@@ -1,7 +1,6 @@
 package sdk
 
 import (
-	"context"
 	"sync"
 
 	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
@@ -18,7 +17,12 @@ type Command struct {
 	// "admin". The value is case-insensitive; anything else is normalized to
 	// "everyone" when the command is registered (see registry.drain).
 	Permission string
-	Handler    func(e *Event, args []string) (string, error)
+	// ParentGroup is the command group this command belongs to ("" = top-level).
+	// When set, the command is treated as a sub-command of that group.
+	ParentGroup string
+	// IsSubCommand marks this command as a sub-command of ParentGroup.
+	IsSubCommand bool
+	Handler      func(e *Event, args []string) (string, error)
 	// ChainHandler, when set, is preferred over Handler and lets the command
 	// return a full message chain (text + image + file components).
 	ChainHandler func(e *Event, args []string) ([]Component, error)
@@ -236,12 +240,14 @@ func (p *Plugin) RegisterSessionWait(umo string, timeoutSec int, handler func(e 
 	p.sessionWaitsMu.Unlock()
 
 	// 反向告知宿主注册等待；失败时仅日志（宿主不支持该特性时返回空 wait_id）。
-	if h := getHostHooks(); h.RegisterSessionWait != nil {
-		if svc, err := hostServiceClient(); err == nil {
-			_, _ = svc.RegisterSessionWait(context.Background(), &sdkv1.RegisterSessionWaitRequest{
-				Umo:            umo,
-				TimeoutSeconds: int32(timeoutSec),
-			})
+	if svc, err := hostServiceClient(); err == nil {
+		ctx, cancel := hostRPCCtx()
+		defer cancel()
+		if _, rerr := svc.RegisterSessionWait(ctx, &sdkv1.RegisterSessionWaitRequest{
+			Umo:            umo,
+			TimeoutSeconds: int32(timeoutSec),
+		}); rerr != nil {
+			logService().Warn("RegisterSessionWait 上报宿主失败", "umo", umo, "err", rerr)
 		}
 	}
 	return w
@@ -252,9 +258,11 @@ func (p *Plugin) UnregisterSessionWait(umo string) {
 	p.sessionWaitsMu.Lock()
 	delete(p.sessionWaits, umo)
 	p.sessionWaitsMu.Unlock()
-	if h := getHostHooks(); h.UnregisterSessionWait != nil {
-		if svc, err := hostServiceClient(); err == nil {
-			_, _ = svc.UnregisterSessionWait(context.Background(), &sdkv1.UnregisterSessionWaitRequest{WaitId: umo})
+	if svc, err := hostServiceClient(); err == nil {
+		ctx, cancel := hostRPCCtx()
+		defer cancel()
+		if _, rerr := svc.UnregisterSessionWait(ctx, &sdkv1.UnregisterSessionWaitRequest{WaitId: umo}); rerr != nil {
+			logService().Warn("UnregisterSessionWait 上报宿主失败", "umo", umo, "err", rerr)
 		}
 	}
 }

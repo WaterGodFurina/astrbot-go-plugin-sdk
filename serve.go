@@ -218,11 +218,13 @@ func (s *serviceServer) Register(context.Context, *sdkv1.RegisterRequest) (*sdkv
 	}
 	for _, c := range s.impl.Commands {
 		resp.Commands = append(resp.Commands, &sdkv1.CommandDesc{
-			Name:        c.Name,
-			Aliases:     c.Aliases,
-			Description: c.Description,
-			Usage:       c.Usage,
-			Permission:  c.Permission,
+			Name:         c.Name,
+			Aliases:      c.Aliases,
+			Description:  c.Description,
+			Usage:        c.Usage,
+			Permission:   c.Permission,
+			ParentGroup:  c.ParentGroup,
+			IsSubCommand: c.IsSubCommand,
 		})
 	}
 	for _, f := range s.impl.Filters {
@@ -409,6 +411,11 @@ func decodePayload(b []byte, out any) {
 // chain and may return a decorated one; payload-carrying hooks (on_llm_response,
 // on_using_llm_tool, on_llm_tool_respond, on_plugin_error) receive their typed
 // payload; generic hooks just run.
+//
+// 审查项二-11：原先十余段近似相同的 for 循环重构为表驱动——按
+// hookDispatchers 的固定顺序尝试各钩子类别，首个命中的类别完成处理后即返回；
+// 各类钩子的载荷解码/结果写回差异封装在各自的分发器内，markHandled 时机、
+// 日志、错误处理与返回值语义和原实现保持一致。
 func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookRequest) (*sdkv1.HookResponse, error) {
 	resp := &sdkv1.HookResponse{Handled: false}
 	// markHandled flags "a handler produced a result" on both the legacy
@@ -422,256 +429,237 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 		return resp, nil
 	}
 	e := eventFromJSON(req.EventJson)
-
-	// Result hooks first (decorate the outgoing chain).
-	for _, h := range s.impl.ResultHooks {
-		if h.Name != req.Name {
-			continue
-		}
-		ev := h.Event
-		if ev == "" {
-			ev = "on_decorating_result"
-		}
-		if ev != "on_decorating_result" && ev != "on_result_handling" {
-			continue
-		}
-		if h.Handler == nil {
+	for _, d := range hookDispatchers {
+		matched, err := d.scan(s, req, e, resp, markHandled)
+		if matched {
+			if err != nil {
+				return nil, err
+			}
 			return resp, nil
 		}
-		var chain []Component
-		if len(req.ChainJson) > 0 {
-			_ = json.Unmarshal(req.ChainJson, &chain)
-		}
-		var handlerErr error
-		if err := safeErr(func() error {
-			chain, handlerErr = h.Handler(e, chain)
-			return handlerErr
-		}); err != nil {
-			return nil, err
-		}
-		if handlerErr != nil {
-			return nil, handlerErr
-		}
-		chainJSON, err := json.Marshal(chain)
-		if err != nil {
-			return nil, err
-		}
-		resp.ChainJson = chainJSON
-		resp.Stop = h.Stop
-		markHandled()
-		return resp, nil
-	}
-
-	// LLM response hooks (payload: LLMResponse).
-	for _, h := range s.impl.LLMResponseHooks {
-		if h.Name != req.Name {
-			continue
-		}
-		if h.Handler == nil {
-			return resp, nil
-		}
-		pl := &LLMResponse{}
-		decodePayload(req.PayloadJson, pl)
-		if err := safeErr(func() error { return h.Handler(e, pl) }); err != nil {
-			return nil, err
-		}
-		markHandled()
-		return resp, nil
-	}
-
-	// Tool call hooks (payload: ToolCall).
-	for _, h := range s.impl.ToolCallHooks {
-		if h.Name != req.Name {
-			continue
-		}
-		if h.Handler == nil {
-			return resp, nil
-		}
-		call := &ToolCall{}
-		decodePayload(req.PayloadJson, call)
-		if err := safeErr(func() error { return h.Handler(e, call) }); err != nil {
-			return nil, err
-		}
-		markHandled()
-		return resp, nil
-	}
-
-	// Tool respond hooks (payload: ToolCall).
-	for _, h := range s.impl.ToolRespondHooks {
-		if h.Name != req.Name {
-			continue
-		}
-		if h.Handler == nil {
-			return resp, nil
-		}
-		call := &ToolCall{}
-		decodePayload(req.PayloadJson, call)
-		if err := safeErr(func() error { return h.Handler(e, call) }); err != nil {
-			return nil, err
-		}
-		markHandled()
-		return resp, nil
-	}
-
-	// Plugin error hooks (payload: PluginError).
-	for _, h := range s.impl.PluginErrorHooks {
-		if h.Name != req.Name {
-			continue
-		}
-		if h.Handler == nil {
-			return resp, nil
-		}
-		pe := &PluginError{}
-		decodePayload(req.PayloadJson, pe)
-		if err := safeErr(func() error { return h.Handler(e, pe) }); err != nil {
-			return nil, err
-		}
-		markHandled()
-		return resp, nil
-	}
-
-	// Lifecycle hooks with a string payload (platform / plugin name).
-	for _, h := range s.impl.PlatformLoadedHooks {
-		if h.Name != req.Name {
-			continue
-		}
-		if h.Handler == nil {
-			return resp, nil
-		}
-		name := payloadString(req.PayloadJson)
-		if err := safeErr(func() error { return h.Handler(name) }); err != nil {
-			return nil, err
-		}
-		markHandled()
-		return resp, nil
-	}
-	for _, h := range s.impl.PluginLoadedHooks {
-		if h.Name != req.Name {
-			continue
-		}
-		if h.Handler == nil {
-			return resp, nil
-		}
-		if err := safeErr(func() error { return h.Handler(payloadString(req.PayloadJson)) }); err != nil {
-			return nil, err
-		}
-		markHandled()
-		return resp, nil
-	}
-	for _, h := range s.impl.PluginUnloadedHooks {
-		if h.Name != req.Name {
-			continue
-		}
-		if h.Handler == nil {
-			return resp, nil
-		}
-		if err := safeErr(func() error { return h.Handler(payloadString(req.PayloadJson)) }); err != nil {
-			return nil, err
-		}
-		markHandled()
-		return resp, nil
-	}
-	for _, h := range s.impl.AstrbotLoadedHooks {
-		if h.Name != req.Name {
-			continue
-		}
-		if h.Handler == nil {
-			return resp, nil
-		}
-		if err := safeErr(func() error { return h.Handler() }); err != nil {
-			return nil, err
-		}
-		markHandled()
-		return resp, nil
-	}
-
-	// Agent hooks (on_agent_begin / on_agent_done).
-	for _, h := range s.impl.AgentBeginHooks {
-		if h.Name != req.Name {
-			continue
-		}
-		if h.Handler == nil {
-			return resp, nil
-		}
-		if err := safeErr(func() error { return h.Handler(e) }); err != nil {
-			return nil, err
-		}
-		markHandled()
-		return resp, nil
-	}
-	for _, h := range s.impl.AgentDoneHooks {
-		if h.Name != req.Name {
-			continue
-		}
-		if h.Handler == nil {
-			return resp, nil
-		}
-		pl := &LLMResponse{}
-		decodePayload(req.PayloadJson, pl)
-		if err := safeErr(func() error { return h.Handler(e, pl) }); err != nil {
-			return nil, err
-		}
-		markHandled()
-		return resp, nil
-	}
-
-	// Event-only message hooks (on_message / on_message_received / on_pre_process).
-	for _, h := range s.impl.MessageHooks {
-		if h.Name != req.Name {
-			continue
-		}
-		if h.Handler == nil {
-			return resp, nil
-		}
-		if err := safeErr(func() error { return h.Handler(e) }); err != nil {
-			return nil, err
-		}
-		markHandled()
-		return resp, nil
-	}
-
-	// After-message-sent / waiting-llm-request hooks (event-only).
-	for _, h := range s.impl.AfterMessageSentHooks {
-		if h.Name != req.Name {
-			continue
-		}
-		if h.Handler == nil {
-			return resp, nil
-		}
-		if err := safeErr(func() error { return h.Handler(e) }); err != nil {
-			return nil, err
-		}
-		markHandled()
-		return resp, nil
-	}
-	for _, h := range s.impl.WaitingLLMRequestHooks {
-		if h.Name != req.Name {
-			continue
-		}
-		if h.Handler == nil {
-			return resp, nil
-		}
-		if err := safeErr(func() error { return h.Handler(e) }); err != nil {
-			return nil, err
-		}
-		markHandled()
-		return resp, nil
-	}
-
-	for _, h := range s.impl.Hooks {
-		if h.Name != req.Name {
-			continue
-		}
-		if h.Handler == nil {
-			return resp, nil
-		}
-		if err := safeErr(func() error { return h.Handler(e) }); err != nil {
-			return nil, err
-		}
-		markHandled()
-		return resp, nil
 	}
 	return resp, nil
+}
+
+// hookDispatcher 是 HandleHook 分发表中的一类钩子（审查项二-11 表驱动重构）。
+// scan 扫描该类钩子切片，语义与原先各段循环一致：
+//   - 未命中：返回 (false, nil)，HandleHook 继续尝试下一类别；
+//   - 命中但 Handler 为 nil：返回 (true, nil)，保持 Handled=false 就此返回
+//     （对应原实现的提前 return，不再落入后续类别）；
+//   - 命中且调用成功：markHandled 后返回 (true, nil)；
+//   - 调用返回错误或 panic（safeErr 捕获）：返回 (true, err)。
+type hookDispatcher struct {
+	// desc 是类别说明，用于注释与测试定位。
+	desc string
+	scan func(s *serviceServer, req *sdkv1.HandleHookRequest, e *Event, resp *sdkv1.HookResponse, markHandled func()) (matched bool, err error)
+}
+
+// hookInvoke 封装单个钩子“载荷解码 + 调用 + 结果写回”的差异（审查项二-11）。
+// 仅 result 钩子需要写回（resp.ChainJson / resp.Stop，须在 markHandled 之前完成，
+// 这样 EventResult 能读到最终的 Stop）；其余钩子只读 req 并调用自身 Handler。
+// 返回非 nil error 时 HandleHook 以 gRPC 错误返回。
+type hookInvoke[T any] func(req *sdkv1.HandleHookRequest, e *Event, h T, resp *sdkv1.HookResponse) error
+
+// byName 构造“钩子名严格相等即命中”的通用分发器，沉淀原先各段循环共有的
+// 骨架：按名匹配 → 附加条件（extra，可为 nil，如 result 钩子的事件白名单）→
+// Handler nil 检查 → safeErr 调用 → markHandled（审查项二-11）。
+func byName[T any](
+	desc string,
+	hooks func(*Plugin) []T,
+	nameOf func(T) string,
+	extra func(T) bool,
+	hasHandler func(T) bool,
+	invoke hookInvoke[T],
+) hookDispatcher {
+	return hookDispatcher{
+		desc: desc,
+		scan: func(s *serviceServer, req *sdkv1.HandleHookRequest, e *Event, resp *sdkv1.HookResponse, markHandled func()) (bool, error) {
+			for _, h := range hooks(s.impl) {
+				if nameOf(h) != req.Name {
+					continue
+				}
+				if extra != nil && !extra(h) {
+					continue
+				}
+				if !hasHandler(h) {
+					return true, nil
+				}
+				if err := safeErr(func() error { return invoke(req, e, h, resp) }); err != nil {
+					return true, err
+				}
+				markHandled()
+				return true, nil
+			}
+			return false, nil
+		},
+	}
+}
+
+// dispatchEventOnly 构造“只收事件”钩子的分发器（on_message 系 /
+// on_agent_begin / on_after_message_sent / on_waiting_llm_request 及通用
+// Hook，Handler 均为 func(*Event) error）。审查项二-11。
+func dispatchEventOnly[H any](desc string, hooks func(*Plugin) []H, nameOf func(H) string, handlerOf func(H) func(*Event) error) hookDispatcher {
+	return byName(desc, hooks, nameOf, nil,
+		func(h H) bool { return handlerOf(h) != nil },
+		func(req *sdkv1.HandleHookRequest, e *Event, h H, resp *sdkv1.HookResponse) error {
+			return handlerOf(h)(e)
+		})
+}
+
+// dispatchPayload 构造“事件 + 类型化载荷”钩子的分发器（on_llm_response /
+// on_agent_done 的 LLMResponse，on_using_llm_tool / on_llm_tool_respond 的
+// ToolCall，on_plugin_error 的 PluginError）。审查项二-11。
+func dispatchPayload[H, P any](desc string, hooks func(*Plugin) []H, nameOf func(H) string, handlerOf func(H) func(*Event, P) error, newPayload func() P) hookDispatcher {
+	return byName(desc, hooks, nameOf, nil,
+		func(h H) bool { return handlerOf(h) != nil },
+		func(req *sdkv1.HandleHookRequest, e *Event, h H, resp *sdkv1.HookResponse) error {
+			pl := newPayload()
+			decodePayload(req.PayloadJson, pl)
+			return handlerOf(h)(e, pl)
+		})
+}
+
+// dispatchStringPayload 构造字符串载荷钩子的分发器（on_platform_loaded /
+// on_plugin_loaded / on_plugin_unloaded，载荷经 payloadString 归一化）。
+// 审查项二-11。
+func dispatchStringPayload[H any](desc string, hooks func(*Plugin) []H, nameOf func(H) string, handlerOf func(H) func(string) error) hookDispatcher {
+	return byName(desc, hooks, nameOf, nil,
+		func(h H) bool { return handlerOf(h) != nil },
+		func(req *sdkv1.HandleHookRequest, e *Event, h H, resp *sdkv1.HookResponse) error {
+			return handlerOf(h)(payloadString(req.PayloadJson))
+		})
+}
+
+// resultEventOK 是 result 钩子的附加命中条件：事件缺省视为
+// on_decorating_result，且仅接受 on_decorating_result / on_result_handling。
+func resultEventOK(h ResultHook) bool {
+	ev := h.Event
+	if ev == "" {
+		ev = EventOnDecoratingResult
+	}
+	return ev == EventOnDecoratingResult || ev == EventOnResultHandling
+}
+
+// invokeResultHook 是 result 钩子的调用逻辑：解码入站回复链（与原实现一致，
+// 解码失败静默丢弃、以已解码部分/空链继续）、调用装饰 handler、把装饰结果
+// 与 Stop 写回 resp（markHandled 在其后执行，EventResult 能读到最终
+// Stop）——错误处理路径与原 result 段循环逐行对应。审查项二-11。
+func invokeResultHook(req *sdkv1.HandleHookRequest, e *Event, h ResultHook, resp *sdkv1.HookResponse) error {
+	var chain []Component
+	if len(req.ChainJson) > 0 {
+		_ = json.Unmarshal(req.ChainJson, &chain)
+	}
+	var handlerErr error
+	chain, handlerErr = h.Handler(e, chain)
+	if handlerErr != nil {
+		return handlerErr
+	}
+	chainJSON, err := json.Marshal(chain)
+	if err != nil {
+		return err
+	}
+	resp.ChainJson = chainJSON
+	resp.Stop = h.Stop
+	return nil
+}
+
+// hookDispatchers 是 HandleHook 的钩子分发表（审查项二-11 表驱动重构）。
+// 顺序沿用原实现的串行分发顺序：result 装饰链最先，类型化载荷与生命周期
+// 钩子居中，通用 Hooks 兜底；同名钩子总是由表中靠前的类别先匹配。新增
+// 钩子类型时只需在对应位置插入一个分发器，无需再复制整段循环。
+var hookDispatchers = []hookDispatcher{
+	// Result hooks first (decorate the outgoing chain).
+	byName("result",
+		func(p *Plugin) []ResultHook { return p.ResultHooks },
+		func(h ResultHook) string { return h.Name },
+		resultEventOK,
+		func(h ResultHook) bool { return h.Handler != nil },
+		invokeResultHook),
+
+	// LLM response hooks (payload: LLMResponse).
+	dispatchPayload("llm_response",
+		func(p *Plugin) []LLMResponseHook { return p.LLMResponseHooks },
+		func(h LLMResponseHook) string { return h.Name },
+		func(h LLMResponseHook) func(*Event, *LLMResponse) error { return h.Handler },
+		func() *LLMResponse { return &LLMResponse{} }),
+
+	// Tool call hooks (payload: ToolCall).
+	dispatchPayload("tool_call",
+		func(p *Plugin) []ToolCallHook { return p.ToolCallHooks },
+		func(h ToolCallHook) string { return h.Name },
+		func(h ToolCallHook) func(*Event, *ToolCall) error { return h.Handler },
+		func() *ToolCall { return &ToolCall{} }),
+
+	// Tool respond hooks (payload: ToolCall).
+	dispatchPayload("tool_respond",
+		func(p *Plugin) []ToolRespondHook { return p.ToolRespondHooks },
+		func(h ToolRespondHook) string { return h.Name },
+		func(h ToolRespondHook) func(*Event, *ToolCall) error { return h.Handler },
+		func() *ToolCall { return &ToolCall{} }),
+
+	// Plugin error hooks (payload: PluginError).
+	dispatchPayload("plugin_error",
+		func(p *Plugin) []PluginErrorHook { return p.PluginErrorHooks },
+		func(h PluginErrorHook) string { return h.Name },
+		func(h PluginErrorHook) func(*Event, *PluginError) error { return h.Handler },
+		func() *PluginError { return &PluginError{} }),
+
+	// Lifecycle hooks with a string payload (platform / plugin name).
+	dispatchStringPayload("platform_loaded",
+		func(p *Plugin) []PlatformLoadedHook { return p.PlatformLoadedHooks },
+		func(h PlatformLoadedHook) string { return h.Name },
+		func(h PlatformLoadedHook) func(string) error { return h.Handler }),
+	dispatchStringPayload("plugin_loaded",
+		func(p *Plugin) []PluginLoadedHook { return p.PluginLoadedHooks },
+		func(h PluginLoadedHook) string { return h.Name },
+		func(h PluginLoadedHook) func(string) error { return h.Handler }),
+	dispatchStringPayload("plugin_unloaded",
+		func(p *Plugin) []PluginUnloadedHook { return p.PluginUnloadedHooks },
+		func(h PluginUnloadedHook) string { return h.Name },
+		func(h PluginUnloadedHook) func(string) error { return h.Handler }),
+
+	// AstrBot loaded hooks (no event, no payload).
+	byName("astrbot_loaded",
+		func(p *Plugin) []AstrbotLoadedHook { return p.AstrbotLoadedHooks },
+		func(h AstrbotLoadedHook) string { return h.Name },
+		nil,
+		func(h AstrbotLoadedHook) bool { return h.Handler != nil },
+		func(req *sdkv1.HandleHookRequest, e *Event, h AstrbotLoadedHook, resp *sdkv1.HookResponse) error {
+			return h.Handler()
+		}),
+
+	// Agent hooks (on_agent_begin / on_agent_done).
+	dispatchEventOnly("agent_begin",
+		func(p *Plugin) []AgentBeginHook { return p.AgentBeginHooks },
+		func(h AgentBeginHook) string { return h.Name },
+		func(h AgentBeginHook) func(*Event) error { return h.Handler }),
+	dispatchPayload("agent_done",
+		func(p *Plugin) []AgentDoneHook { return p.AgentDoneHooks },
+		func(h AgentDoneHook) string { return h.Name },
+		func(h AgentDoneHook) func(*Event, *LLMResponse) error { return h.Handler },
+		func() *LLMResponse { return &LLMResponse{} }),
+
+	// Event-only message hooks (on_message / on_message_received / on_pre_process).
+	dispatchEventOnly("message",
+		func(p *Plugin) []MessageHook { return p.MessageHooks },
+		func(h MessageHook) string { return h.Name },
+		func(h MessageHook) func(*Event) error { return h.Handler }),
+
+	// After-message-sent / waiting-llm-request hooks (event-only).
+	dispatchEventOnly("after_message_sent",
+		func(p *Plugin) []AfterMessageSentHook { return p.AfterMessageSentHooks },
+		func(h AfterMessageSentHook) string { return h.Name },
+		func(h AfterMessageSentHook) func(*Event) error { return h.Handler }),
+	dispatchEventOnly("waiting_llm_request",
+		func(p *Plugin) []WaitingLLMRequestHook { return p.WaitingLLMRequestHooks },
+		func(h WaitingLLMRequestHook) string { return h.Name },
+		func(h WaitingLLMRequestHook) func(*Event) error { return h.Handler }),
+
+	// Generic event-only hooks 兜底。
+	dispatchEventOnly("hook",
+		func(p *Plugin) []Hook { return p.Hooks },
+		func(h Hook) string { return h.Name },
+		func(h Hook) func(*Event) error { return h.Handler }),
 }
 
 // payloadString decodes a payload that is either a bare JSON string or an
@@ -879,6 +867,21 @@ func (s *serviceServer) FeedSessionWait(_ context.Context, req *sdkv1.FeedSessio
 	return &sdkv1.FeedSessionWaitResponse{Handled: false}, nil
 }
 
+// webRoute 是 webRoutePattern 的缓存结果（正则 + 动态段名）。
+type webRoute struct {
+	re    *regexp.Regexp
+	names []string
+}
+
+// webRouteCache 缓存 route → 编译结果，避免每个请求都重新编译正则。
+// 正则表达式是确定的，路由集合在 Register 后固定，缓存无需失效。
+var (
+	routeParamRe    = regexp.MustCompile(`<([^>]+)>`)
+	routeSegmentRe  = regexp.MustCompile(`^<[^>]+>$`)
+	webRouteCacheMu sync.Mutex
+	webRouteCache   = map[string]*webRoute{}
+)
+
 // webRoutePattern converts a plugin route like "/emoji/<category>" into a
 // regex with named groups; plain segments match exactly. Only a whole segment
 // of the form "<name>" is treated as a placeholder; a segment like "<a>x" or
@@ -890,7 +893,13 @@ func webRoutePattern(route string) (*regexp.Regexp, []string, error) {
 	if !strings.HasPrefix(normalized, "/") {
 		normalized = "/" + normalized
 	}
-	re := regexp.MustCompile(`<([^>]+)>`)
+	webRouteCacheMu.Lock()
+	if wr, ok := webRouteCache[normalized]; ok {
+		webRouteCacheMu.Unlock()
+		return wr.re, wr.names, nil
+	}
+	webRouteCacheMu.Unlock()
+
 	var names []string
 	chunks := strings.Split(normalized, "/")
 	pattern := ""
@@ -900,9 +909,8 @@ func webRoutePattern(route string) (*regexp.Regexp, []string, error) {
 		}
 		// 整段必须是纯占位符 "<name>"（即 ^<[^>]+>$）才视为动态段；否则按
 		// 字面量转义，避免 <a>x 之类畸形段产生意外匹配。
-		placeholderRe := regexp.MustCompile(`^<[^>]+>$`)
-		if placeholderRe.MatchString(c) {
-			m := re.FindStringSubmatch(c)
+		if routeSegmentRe.MatchString(c) {
+			m := routeParamRe.FindStringSubmatch(c)
 			if len(m) == 2 && m[1] != "" {
 				names = append(names, m[1])
 				pattern += "/([^/]+)"
@@ -918,6 +926,11 @@ func webRoutePattern(route string) (*regexp.Regexp, []string, error) {
 		pattern = "/"
 	}
 	re, err := regexp.Compile("^" + pattern + "$")
+	if err == nil {
+		webRouteCacheMu.Lock()
+		webRouteCache[normalized] = &webRoute{re: re, names: names}
+		webRouteCacheMu.Unlock()
+	}
 	return re, names, err
 }
 
@@ -944,7 +957,7 @@ func (s *serviceServer) HandleWebRequest(_ context.Context, req *sdkv1.HandleWeb
 		if !match {
 			continue
 		}
-		re, _, err := webRoutePattern(w.Route)
+		re, names, err := webRoutePattern(w.Route)
 		if err != nil {
 			continue
 		}
@@ -961,10 +974,9 @@ func (s *serviceServer) HandleWebRequest(_ context.Context, req *sdkv1.HandleWeb
 			headers[kv.Key] = append(headers[kv.Key], kv.Value)
 		}
 		pathParams := map[string]string{}
-		names := re.SubexpNames()
 		for i, n := range names {
-			if i > 0 && n != "" {
-				pathParams[n] = sm[i]
+			if len(sm) > i+1 {
+				pathParams[n] = sm[i+1]
 			}
 		}
 		if w.Handler == nil {

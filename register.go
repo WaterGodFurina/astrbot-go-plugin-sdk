@@ -195,14 +195,19 @@ func RegisterAgentDoneHook(h AgentDoneHook) {
 	global.agentDoneHooks = append(global.agentDoneHooks, h)
 }
 
-// normalizePermission validates a command's Permission string. Values other
-// than "admin" (case-insensitive) fall back to "everyone", matching the
-// permission vocabulary the host consumes in CommandDesc.Permission.
+// normalizePermission validates a command's Permission string. 合法值为
+// admin / everyone / 空串（大小写不敏感、忽略首尾空白，空串视为默认
+// everyone），均静默返回；其余未知值打 Warn 并回退 everyone（子任务 F2：
+// 原 default 分支对合法的 everyone / 空串也告警，属误报，此处仅对真正未知
+// 的值告警；各输入的返回值与原先保持一致）。
 func normalizePermission(p string) string {
 	switch strings.ToLower(strings.TrimSpace(p)) {
 	case "admin":
 		return "admin"
+	case "everyone", "":
+		return "everyone"
 	default:
+		logService().Warn("Command.Permission 未知，已回退为 everyone", "permission", p)
 		return "everyone"
 	}
 }

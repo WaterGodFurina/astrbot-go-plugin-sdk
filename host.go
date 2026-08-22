@@ -454,6 +454,10 @@ func getHostHooks() HostServiceHooks {
 	return hostHooks
 }
 
+// hostServiceLoggerMu 保护 hostServiceLogger（SetHostServiceLogger 写、
+// warnJSON 读）。
+var hostServiceLoggerMu sync.RWMutex
+
 // hostServiceLogger 是宿主侧 HostService 的告警日志通道。SDK 没有宿主注入
 // 的 logger，默认输出到 stderr；宿主可在启动插件前通过 SetHostServiceLogger
 // 替换为自带 logger。
@@ -468,25 +472,29 @@ func SetHostServiceLogger(l hclog.Logger) {
 	if l == nil {
 		return
 	}
+	hostServiceLoggerMu.Lock()
 	hostServiceLogger = l
+	hostServiceLoggerMu.Unlock()
 }
 
 // warnJSON 记录 HostService 处理中 JSON 编解码失败，避免被 `_ =` 静默吞掉
 // （26-4）。调用方行为不变：尽力降级为空值并继续。
 func warnJSON(what string, err error) {
 	if err != nil {
-		hostServiceLogger.Warn("host service JSON 处理失败", "what", what, "err", err)
+		hostServiceLoggerMu.RLock()
+		logger := hostServiceLogger
+		hostServiceLoggerMu.RUnlock()
+		logger.Warn("host service JSON 处理失败", "what", what, "err", err)
 	}
 }
 
 // requireIdentity 是控制面 HostService RPC 的最小鉴权：插件管理、会话/
-// Provider 控制、会话等待注册等会改动宿主生态或状态的操作必须绑定身份
-// （s.pluginID 非空）。宿主未设置身份时（SetCurrentHostPluginID /
+// Provider 控制、会话等待注册、配置读写等会改动宿主生态或状态的操作必须
+// 绑定身份（s.pluginID 非空）。宿主未设置身份时（SetCurrentHostPluginID /
 // BindHostServiceName 未生效）pluginID 为空，一律拒绝，防止匿名/未绑定身份
-// 插件接管宿主插件生态（26-2）。GetConfig/SetConfig 走更细粒度的名字隔离
-// （见其各自实现），不在此列。
+// 插件接管宿主插件生态（26-2）。
 func (s *hostServiceServer) requireIdentity() error {
-	if s.pluginID == "" {
+	if s.identity() == "" {
 		return status.Error(codes.PermissionDenied, "control-plane HostService RPC requires a bound plugin identity")
 	}
 	return nil
@@ -504,7 +512,7 @@ func dropPluginHostState(connKey string) {
 	registered := ""
 	hostServersMu.Lock()
 	if s, ok := hostServers[connKey]; ok {
-		registered = s.pluginID
+		registered = s.identity()
 		delete(hostServers, connKey)
 	}
 	hostServersMu.Unlock()
@@ -554,12 +562,21 @@ func acceptHostService(b *plugin.GRPCBroker, id uint32) (*grpc.Server, net.Liste
 // connection was accepted, so reverse calls can be validated per-plugin.
 type hostServiceServer struct {
 	sdkv1.UnimplementedHostServiceServer
+	// idMu 保护 pluginID（BindHostServiceName 写、各 RPC 读）。
+	idMu sync.RWMutex
 	// pluginID 是当前连接身份：accept 时为 manifest id，Register 后由
 	// BindHostServiceName 更新为注册名（GetConfig/SetConfig 传的是注册名）。
 	pluginID string
 	// connKey 是 accept 时刻的 manifest id，hostServers 表以此作为 key；
 	// 连接关闭时用于清理 hostServers 与限流表条目（26-3）。
 	connKey string
+}
+
+// identity 返回当前连接身份（带锁读 pluginID）。
+func (s *hostServiceServer) identity() string {
+	s.idMu.RLock()
+	defer s.idMu.RUnlock()
+	return s.pluginID
 }
 
 // hostPluginID is the id of the plugin the host is currently establishing a
@@ -602,14 +619,17 @@ func BindHostServiceName(id, name string) {
 	hostServersMu.Lock()
 	defer hostServersMu.Unlock()
 	if s, ok := hostServers[id]; ok {
+		s.idMu.Lock()
 		s.pluginID = name
+		s.idMu.Unlock()
 	}
 }
 
 func (s *hostServiceServer) CallAction(_ context.Context, req *sdkv1.CallActionRequest) (*sdkv1.CallActionResponse, error) {
 	// CallAction 是高频平台 API 入口，做与 ChatLLM 同款的窗口限流（26-6）。
-	if !callActionRate.allow(s.pluginID) {
-		return nil, status.Errorf(codes.ResourceExhausted, "插件 %q CallAction 调用过于频繁（每分钟上限 %d 次）", s.pluginID, callActionRate.maxPer)
+	id := s.identity()
+	if !callActionRate.allow(id) {
+		return nil, status.Errorf(codes.ResourceExhausted, "插件 %q CallAction 调用过于频繁（每分钟上限 %d 次）", id, callActionRate.limit())
 	}
 	h := getHostHooks()
 	if h.CallAction == nil {
@@ -659,9 +679,12 @@ func (s *hostServiceServer) RecallMessage(_ context.Context, req *sdkv1.RecallMe
 func (s *hostServiceServer) GetConfig(_ context.Context, req *sdkv1.GetConfigRequest) (*sdkv1.GetConfigResponse, error) {
 	// 身份隔离：插件只能读取自己名字的配置，禁止探测/读取其他插件配置
 	//（插件自身以宿主用户运行、可直接读文件系统，此校验是纵深防御，
-	//  真正隔离需插件降权/容器化）。
-	if s.pluginID != "" && req.PluginName != s.pluginID {
-		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权读取插件 %q 的配置", s.pluginID, req.PluginName)
+	//  真正隔离需插件降权/容器化）。空身份一律拒绝（fail-closed）。
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	if req.PluginName != s.identity() {
+		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权读取插件 %q 的配置", s.identity(), req.PluginName)
 	}
 	h := getHostHooks()
 	if h.GetConfig == nil {
@@ -679,9 +702,13 @@ func (s *hostServiceServer) GetConfig(_ context.Context, req *sdkv1.GetConfigReq
 }
 
 func (s *hostServiceServer) SetConfig(_ context.Context, req *sdkv1.SetConfigRequest) (*sdkv1.Empty, error) {
-	// 身份隔离：插件只能写自己名字的配置，禁止篡改其他插件配置。
-	if s.pluginID != "" && req.PluginName != s.pluginID {
-		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权修改插件 %q 的配置", s.pluginID, req.PluginName)
+	// 身份隔离：插件只能写自己名字的配置，禁止篡改其他插件配置。空身份
+	// 一律拒绝（fail-closed）。
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	if req.PluginName != s.identity() {
+		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权修改插件 %q 的配置", s.identity(), req.PluginName)
 	}
 	h := getHostHooks()
 	if h.SetConfig == nil {
@@ -705,7 +732,8 @@ type rateWindow struct {
 
 // rateTable 是"插件→窗口计数"的限流表，用 pluginID 作为 key。只增不减会
 // 在插件频繁装卸/长期运行时持续累积（26-3），故提供 drop 供连接关闭时清理。
-// pluginID 空时（旧宿主未设置身份）不进行限流，保证兼容。
+// pluginID 空时（旧宿主未设置身份）归入独立的 __anonymous__ 保守配额，
+// 避免匿名调用绕过限流（fail-closed）。
 type rateTable struct {
 	mu     sync.Mutex
 	maxPer int
@@ -714,8 +742,11 @@ type rateTable struct {
 
 // allow 返回本次调用是否放行，并推进窗口计数。
 func (r *rateTable) allow(id string) bool {
-	if id == "" || r == nil {
-		return true // 未知身份不限流，保证兼容
+	if r == nil {
+		return true
+	}
+	if id == "" {
+		id = "__anonymous__"
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -728,6 +759,16 @@ func (r *rateTable) allow(id string) bool {
 	e.count++
 	r.table[id] = e
 	return e.count <= r.maxPer
+}
+
+// limit 返回当前窗口上限（带锁读，供错误信息展示）。
+func (r *rateTable) limit() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.maxPer
 }
 
 // drop 删除某插件 id 的限流条目，供连接关闭时清理（26-3）。
@@ -752,6 +793,8 @@ var callActionRate = &rateTable{maxPer: maxChatLLMPerMinute, table: map[string]r
 // 限流），供宿主在启动前配置（26-6，原 maxChatLLMPerMinute 硬编码）。
 // 未调用时默认 30。返回设置前的旧值。
 func SetChatLLMRateLimit(perMinute int) int {
+	chatLLMRate.mu.Lock()
+	defer chatLLMRate.mu.Unlock()
 	old := chatLLMRate.maxPer
 	if perMinute > 0 {
 		chatLLMRate.maxPer = perMinute
@@ -760,8 +803,9 @@ func SetChatLLMRateLimit(perMinute int) int {
 }
 
 func (s *hostServiceServer) ChatLLM(_ context.Context, req *sdkv1.ChatLLMRequest) (*sdkv1.ChatLLMResponse, error) {
-	if !chatLLMRate.allow(s.pluginID) {
-		return nil, status.Errorf(codes.ResourceExhausted, "插件 %q ChatLLM 调用过于频繁（每分钟上限 %d 次）", s.pluginID, chatLLMRate.maxPer)
+	id := s.identity()
+	if !chatLLMRate.allow(id) {
+		return nil, status.Errorf(codes.ResourceExhausted, "插件 %q ChatLLM 调用过于频繁（每分钟上限 %d 次）", id, chatLLMRate.limit())
 	}
 	h := getHostHooks()
 	if h.ChatLLM == nil {
@@ -884,6 +928,9 @@ func (s *hostServiceServer) SwitchConversation(_ context.Context, req *sdkv1.Swi
 }
 
 func (s *hostServiceServer) UpdateConversationTitle(_ context.Context, req *sdkv1.UpdateConversationTitleRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
 	h := getHostHooks()
 	if h.UpdateConversationTitle == nil {
 		return &sdkv1.Empty{}, nil
@@ -1114,19 +1161,23 @@ func (s *hostServiceServer) UninstallPlugin(_ context.Context, req *sdkv1.Uninst
 func (s *hostServiceServer) RegisterSessionWait(_ context.Context, req *sdkv1.RegisterSessionWaitRequest) (*sdkv1.RegisterSessionWaitResponse, error) {
 	// 空身份时拒绝注册：宿主无法把等待归属到任何插件，避免记录无主等待
 	//（26-5）；同时归入控制面最小鉴权（26-2）。
-	if s.pluginID == "" {
+	if s.identity() == "" {
 		return nil, status.Error(codes.FailedPrecondition, "cannot register session wait without a bound plugin identity")
 	}
 	h := getHostHooks()
 	if h.RegisterSessionWait == nil {
 		return &sdkv1.RegisterSessionWaitResponse{}, nil
 	}
-	waitID := h.RegisterSessionWait(s.pluginID, req.Umo, req.TimeoutSeconds)
+	waitID := h.RegisterSessionWait(s.identity(), req.Umo, req.TimeoutSeconds)
 	return &sdkv1.RegisterSessionWaitResponse{WaitId: waitID}, nil
 }
 
 // UnregisterSessionWait removes a previously registered session wait.
 func (s *hostServiceServer) UnregisterSessionWait(_ context.Context, req *sdkv1.UnregisterSessionWaitRequest) (*sdkv1.Empty, error) {
+	// 对齐 RegisterSessionWait 的控制面最小鉴权：注销等待同样需要绑定身份。
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
 	h := getHostHooks()
 	if h.UnregisterSessionWait == nil {
 		return &sdkv1.Empty{}, nil
@@ -1140,14 +1191,14 @@ func (s *hostServiceServer) UnregisterSessionWait(_ context.Context, req *sdkv1.
 // 空身份时拒绝（对齐 RegisterSessionWait 的控制面最小鉴权），避免登记无主
 // 钩子。
 func (s *hostServiceServer) RegisterBridgeHook(_ context.Context, req *sdkv1.BridgeHookRequest) (*sdkv1.Empty, error) {
-	if s.pluginID == "" {
+	if s.identity() == "" {
 		return nil, status.Error(codes.FailedPrecondition, "cannot register bridge hook without a bound plugin identity")
 	}
 	h := getHostHooks()
 	if h.RegisterBridgeHook == nil {
 		return &sdkv1.Empty{}, nil
 	}
-	if err := h.RegisterBridgeHook(s.pluginID, req.HookName); err != nil {
+	if err := h.RegisterBridgeHook(s.identity(), req.HookName); err != nil {
 		return nil, err
 	}
 	return &sdkv1.Empty{}, nil
@@ -1159,7 +1210,7 @@ func (s *hostServiceServer) UnregisterBridgeHook(_ context.Context, req *sdkv1.B
 	if h.UnregisterBridgeHook == nil {
 		return &sdkv1.Empty{}, nil
 	}
-	if err := h.UnregisterBridgeHook(s.pluginID, req.HookName); err != nil {
+	if err := h.UnregisterBridgeHook(s.identity(), req.HookName); err != nil {
 		return nil, err
 	}
 	return &sdkv1.Empty{}, nil

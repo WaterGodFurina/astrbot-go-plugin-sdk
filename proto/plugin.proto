@@ -194,6 +194,9 @@ message CommandDesc {
   string description = 3;
   string usage = 4;
   string permission = 5; // "everyone" | "admin"
+  // Group/sub-command relation (empty when the command is top-level).
+  string parent_group = 6;
+  bool is_sub_command = 7;
 }
 
 // FilterDesc describes an event filter the plugin registers.
