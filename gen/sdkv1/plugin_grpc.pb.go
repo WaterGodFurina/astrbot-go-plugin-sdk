@@ -55,6 +55,7 @@ const (
 	PluginService_HandleLLMRequest_FullMethodName = "/astrbot.sdk.v1.PluginService/HandleLLMRequest"
 	PluginService_HandleTool_FullMethodName       = "/astrbot.sdk.v1.PluginService/HandleTool"
 	PluginService_ListTools_FullMethodName        = "/astrbot.sdk.v1.PluginService/ListTools"
+	PluginService_ListWebApis_FullMethodName      = "/astrbot.sdk.v1.PluginService/ListWebApis"
 	PluginService_HandleWebRequest_FullMethodName = "/astrbot.sdk.v1.PluginService/HandleWebRequest"
 	PluginService_HealthCheck_FullMethodName      = "/astrbot.sdk.v1.PluginService/HealthCheck"
 	PluginService_SetLogLevel_FullMethodName      = "/astrbot.sdk.v1.PluginService/SetLogLevel"
@@ -91,6 +92,13 @@ type PluginServiceClient interface {
 	// live tool list through this RPC instead of relying on the Register
 	// snapshot (aligned with Python AstrBot's runtime tool collection).
 	ListTools(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*ListToolsResponse, error)
+	// ListWebApis returns the plugin's CURRENT Web API routes. Plugin routes may
+	// be registered during instantiation (context.register_web_api in
+	// __init__/initialize), after the Register snapshot — so the host pulls the
+	// live route list through this RPC (aligned with ListTools). Old plugin
+	// binaries without this RPC return UNIMPLEMENTED; the host falls back to the
+	// Register snapshot.
+	ListWebApis(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*ListWebApisResponse, error)
 	// HandleWebRequest dispatches a dashboard HTTP request to a plugin-registered
 	// Web API (context.register_web_api / /api/plug/<path>).
 	HandleWebRequest(ctx context.Context, in *HandleWebRequestRequest, opts ...grpc.CallOption) (*HandleWebRequestResponse, error)
@@ -194,6 +202,16 @@ func (c *pluginServiceClient) ListTools(ctx context.Context, in *Empty, opts ...
 	return out, nil
 }
 
+func (c *pluginServiceClient) ListWebApis(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*ListWebApisResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListWebApisResponse)
+	err := c.cc.Invoke(ctx, PluginService_ListWebApis_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *pluginServiceClient) HandleWebRequest(ctx context.Context, in *HandleWebRequestRequest, opts ...grpc.CallOption) (*HandleWebRequestResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(HandleWebRequestResponse)
@@ -282,6 +300,13 @@ type PluginServiceServer interface {
 	// live tool list through this RPC instead of relying on the Register
 	// snapshot (aligned with Python AstrBot's runtime tool collection).
 	ListTools(context.Context, *Empty) (*ListToolsResponse, error)
+	// ListWebApis returns the plugin's CURRENT Web API routes. Plugin routes may
+	// be registered during instantiation (context.register_web_api in
+	// __init__/initialize), after the Register snapshot — so the host pulls the
+	// live route list through this RPC (aligned with ListTools). Old plugin
+	// binaries without this RPC return UNIMPLEMENTED; the host falls back to the
+	// Register snapshot.
+	ListWebApis(context.Context, *Empty) (*ListWebApisResponse, error)
 	// HandleWebRequest dispatches a dashboard HTTP request to a plugin-registered
 	// Web API (context.register_web_api / /api/plug/<path>).
 	HandleWebRequest(context.Context, *HandleWebRequestRequest) (*HandleWebRequestResponse, error)
@@ -335,6 +360,9 @@ func (UnimplementedPluginServiceServer) HandleTool(context.Context, *HandleToolR
 }
 func (UnimplementedPluginServiceServer) ListTools(context.Context, *Empty) (*ListToolsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListTools not implemented")
+}
+func (UnimplementedPluginServiceServer) ListWebApis(context.Context, *Empty) (*ListWebApisResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListWebApis not implemented")
 }
 func (UnimplementedPluginServiceServer) HandleWebRequest(context.Context, *HandleWebRequestRequest) (*HandleWebRequestResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method HandleWebRequest not implemented")
@@ -501,6 +529,24 @@ func _PluginService_ListTools_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PluginService_ListWebApis_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).ListWebApis(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_ListWebApis_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).ListWebApis(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _PluginService_HandleWebRequest_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(HandleWebRequestRequest)
 	if err := dec(in); err != nil {
@@ -643,6 +689,10 @@ var PluginService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListTools",
 			Handler:    _PluginService_ListTools_Handler,
+		},
+		{
+			MethodName: "ListWebApis",
+			Handler:    _PluginService_ListWebApis_Handler,
 		},
 		{
 			MethodName: "HandleWebRequest",

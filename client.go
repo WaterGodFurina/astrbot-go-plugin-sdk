@@ -202,14 +202,15 @@ func (c *Client) handleHook(ctx context.Context, name string, e *Event, chain []
 }
 
 // HandleLLMRequest invokes an on_llm_request hook, returning the (possibly
-// modified) system prompt, the stop flag, and the EventResult (never nil;
-// `result.Sent` reports plugin sends, with legacy fallback).
-func (c *Client) HandleLLMRequest(ctx context.Context, name string, e *Event, systemPrompt, userPrompt string) (string, bool, *sdkv1.EventResult, error) {
+// modified) system prompt, the (possibly modified) user prompt, the stop
+// flag, and the EventResult (never nil; `result.Sent` reports plugin sends,
+// with legacy fallback).
+func (c *Client) HandleLLMRequest(ctx context.Context, name string, e *Event, systemPrompt, userPrompt string) (system, user string, stop bool, res *sdkv1.EventResult, err error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 	ev, err := json.Marshal(e)
 	if err != nil {
-		return systemPrompt, false, &sdkv1.EventResult{}, err
+		return systemPrompt, userPrompt, false, &sdkv1.EventResult{}, err
 	}
 	resp, err := c.svc.HandleLLMRequest(ctx, &sdkv1.HandleLLMRequestRequest{
 		Name:         name,
@@ -218,10 +219,20 @@ func (c *Client) HandleLLMRequest(ctx context.Context, name string, e *Event, sy
 		UserPrompt:   userPrompt,
 	}, rpcCallOpts...)
 	if err != nil {
-		return systemPrompt, false, &sdkv1.EventResult{}, err
+		return systemPrompt, userPrompt, false, &sdkv1.EventResult{}, err
 	}
-	res := normalizeResult(resp.Result, resp.Sent, resp.Stop, false)
-	return resp.SystemPrompt, res.StopPropagation, res, nil
+	result := normalizeResult(resp.Result, resp.Sent, resp.Stop, false)
+	return resp.SystemPrompt, resp.UserPrompt, result.StopPropagation, result, nil
+}
+
+// ListWebApis returns the plugin's current Web API routes (pulled live:
+// plugin routes may be registered during instantiation, after Register).
+func (c *Client) ListWebApis(ctx context.Context) ([]*sdkv1.WebApiDesc, error) {
+	resp, err := c.svc.ListWebApis(ctx, &sdkv1.Empty{}, rpcCallOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetWebApis(), nil
 }
 
 // ListTools returns the plugin's current LLM function tools (pulled live:
@@ -320,12 +331,8 @@ func (c *Client) Close() error {
 	if c == nil {
 		return nil
 	}
-	if c.hostSrvServer != nil {
-		// 清理该连接遗留的宿主侧状态（hostServers 登记 + 限流窗口），
-		// 避免表只增不减（26-3）。用 connKey（manifest id）清除。
-		dropPluginHostState(c.hostSrvServer.connKey)
-		c.hostSrvServer = nil
-	}
+	// 先 Stop 再清宿主侧状态：Stop 之前在途 RPC（如 Cleanup 钩子里的
+	// GetConfig/SetConfig）不会命中"登记已删"状态。
 	if c.hostSrv != nil {
 		c.hostSrv.Stop()
 		c.hostSrv = nil
@@ -333,6 +340,13 @@ func (c *Client) Close() error {
 	if c.hostLis != nil {
 		_ = c.hostLis.Close()
 		c.hostLis = nil
+	}
+	if c.hostSrvServer != nil {
+		// 清理该连接遗留的宿主侧状态（hostServers 登记 + 限流窗口），
+		// 避免表只增不减（26-3）。传 server 本身做归属比对，防止重载
+		// 竞态下误删后继连接的登记。
+		dropPluginHostState(c.hostSrvServer.connKey, c.hostSrvServer)
+		c.hostSrvServer = nil
 	}
 	if c.conn != nil {
 		return c.conn.Close()

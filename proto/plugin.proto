@@ -56,6 +56,13 @@ service PluginService {
   // live tool list through this RPC instead of relying on the Register
   // snapshot (aligned with Python AstrBot's runtime tool collection).
   rpc ListTools(Empty) returns (ListToolsResponse);
+  // ListWebApis returns the plugin's CURRENT Web API routes. Plugin routes may
+  // be registered during instantiation (context.register_web_api in
+  // __init__/initialize), after the Register snapshot — so the host pulls the
+  // live route list through this RPC (aligned with ListTools). Old plugin
+  // binaries without this RPC return UNIMPLEMENTED; the host falls back to the
+  // Register snapshot.
+  rpc ListWebApis(Empty) returns (ListWebApisResponse);
   // HandleWebRequest dispatches a dashboard HTTP request to a plugin-registered
   // Web API (context.register_web_api / /api/plug/<path>).
   rpc HandleWebRequest(HandleWebRequestRequest) returns (HandleWebRequestResponse);
@@ -362,6 +369,8 @@ message HandleLLMRequestResponse {
   bool sent = 3;
   // EventResult aggregates the outcome flags (legacy fallback: stop/sent).
   EventResult result = 4;
+  // (Possibly modified) user prompt sent back to the model.
+  string user_prompt = 5;
 }
 
 message HandleToolRequest {
@@ -384,6 +393,10 @@ message HandleToolResponse {
 
 message ListToolsResponse {
   repeated ToolDesc tools = 1;
+}
+
+message ListWebApisResponse {
+  repeated WebApiDesc web_apis = 1;
 }
 
 message HealthResponse {

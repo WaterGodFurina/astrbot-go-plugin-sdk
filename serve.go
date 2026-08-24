@@ -15,10 +15,17 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Handshake is the go-plugin handshake shared between the host and plugins.
 // It must match exactly on both sides (defined here once, used by both).
+//
+// 版本纪律：行为不兼容的变更（字段语义变化、旧插件二进制无法与宿主正确
+// 交互）必须 bump ProtocolVersion，让握手期拦截不匹配的双方；新增字段或
+// 新增 RPC 不需要 bump（旧插件由 client.go 的 legacy 字段折叠与新 host 的
+// nil-result 兜底兼容）。
 var Handshake = plugin.HandshakeConfig{
 	ProtocolVersion:  1,
 	MagicCookieKey:   "ASTRBOT_PLUGIN_MAGIC_COOKIE",
@@ -159,6 +166,8 @@ func (p *PluginServiceGRPCPlugin) GRPCServer(broker *plugin.GRPCBroker, s *grpc.
 				}
 				time.Sleep(250 * time.Millisecond)
 			}
+			logService().Error("预连接宿主 HostService 失败（broker ConnInfo 即将过期），" +
+				"本插件的反向调用（GetConfig/SendMessage/ChatLLM 等）可能永久不可用")
 		}()
 	}
 	sdkv1.RegisterPluginServiceServer(s, &serviceServer{impl: p.Impl})
@@ -200,15 +209,26 @@ type serviceServer struct {
 	impl *Plugin
 }
 
+// marshalSchema 序列化 schema map。nil map 会得到字面量 "null"（宿主端
+// Unmarshal 后 map 为 nil，后续写入即 panic），统一归一为 "{}"；marshal
+// 失败同样回退 "{}"。
+func marshalSchema(v map[string]any) []byte {
+	if v == nil {
+		return []byte("{}")
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return []byte("{}")
+	}
+	return b
+}
+
 // Register returns the plugin's metadata and handler descriptors.
 func (s *serviceServer) Register(context.Context, *sdkv1.RegisterRequest) (*sdkv1.RegisterResponse, error) {
 	if s.impl == nil {
 		return &sdkv1.RegisterResponse{}, nil
 	}
-	schema, err := json.Marshal(s.impl.ConfigSchema)
-	if err != nil {
-		schema = []byte("{}")
-	}
+	schema := marshalSchema(s.impl.ConfigSchema)
 	resp := &sdkv1.RegisterResponse{
 		Name:             s.impl.Name,
 		Version:          s.impl.Version,
@@ -283,14 +303,10 @@ func (s *serviceServer) Register(context.Context, *sdkv1.RegisterRequest) (*sdkv
 		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnAgentDone})
 	}
 	for _, t := range s.impl.Tools {
-		params, err := json.Marshal(t.ParamsSchema)
-		if err != nil {
-			params = []byte("{}")
-		}
 		resp.Tools = append(resp.Tools, &sdkv1.ToolDesc{
 			Name:        t.Name,
 			Description: t.Description,
-			ParamsJson:  params,
+			ParamsJson:  marshalSchema(t.ParamsSchema),
 		})
 	}
 	for _, w := range s.impl.WebAPIs {
@@ -317,11 +333,23 @@ func eventResult(handled, stop bool) *sdkv1.EventResult {
 }
 
 // HandleCommand dispatches to a command handler by name.
+//
+// 错误语义对照（三入口差异有意保留，宿主侧需分别处理）：
+//   - HandleCommand：命中命令后 handler 的 panic/错误以 gRPC error 返回，
+//     宿主应记录 plugin_error；
+//   - HandleTool：同类错误转 IsError=true 内联文本正常返回；
+//   - HandleWebRequest：同类错误转 500 响应。
+//
+// 命中命令但两个 Handler 均为 nil 时返回显式 Handled=false 的 Result，
+// 供宿主区分"命令不存在"与"存在但未执行"。
 func (s *serviceServer) HandleCommand(_ context.Context, req *sdkv1.HandleCommandRequest) (*sdkv1.HandleCommandResponse, error) {
 	if s.impl == nil {
 		return &sdkv1.HandleCommandResponse{}, nil
 	}
-	e := eventFromJSON(req.EventJson)
+	e, err := eventFromJSONStrict(req.EventJson)
+	if err != nil {
+		return nil, err
+	}
 	for _, c := range s.impl.Commands {
 		if c.Name != req.Name {
 			continue
@@ -347,7 +375,7 @@ func (s *serviceServer) HandleCommand(_ context.Context, req *sdkv1.HandleComman
 			return resp, nil
 		}
 		if c.Handler == nil {
-			return &sdkv1.HandleCommandResponse{}, nil
+			return &sdkv1.HandleCommandResponse{Result: eventResult(false, false)}, nil
 		}
 		var text string
 		var err error
@@ -540,14 +568,16 @@ func resultEventOK(h ResultHook) bool {
 	return ev == EventOnDecoratingResult || ev == EventOnResultHandling
 }
 
-// invokeResultHook 是 result 钩子的调用逻辑：解码入站回复链（与原实现一致，
-// 解码失败静默丢弃、以已解码部分/空链继续）、调用装饰 handler、把装饰结果
-// 与 Stop 写回 resp（markHandled 在其后执行，EventResult 能读到最终
-// Stop）——错误处理路径与原 result 段循环逐行对应。审查项二-11。
+// invokeResultHook 是 result 钩子的调用逻辑：解码入站回复链（解码失败打
+// Warn 后以空链继续，不再静默）、调用装饰 handler、把装饰结果与 Stop 写回
+// resp（markHandled 在其后执行，EventResult 能读到最终 Stop）——错误处理
+// 路径与原 result 段循环逐行对应。审查项二-11。
 func invokeResultHook(req *sdkv1.HandleHookRequest, e *Event, h ResultHook, resp *sdkv1.HookResponse) error {
 	var chain []Component
 	if len(req.ChainJson) > 0 {
-		_ = json.Unmarshal(req.ChainJson, &chain)
+		if err := json.Unmarshal(req.ChainJson, &chain); err != nil {
+			logService().Warn("invokeResultHook: 入站 chain_json 解码失败，以空链继续", "error", err)
+		}
 	}
 	var handlerErr error
 	chain, handlerErr = h.Handler(e, chain)
@@ -717,6 +747,7 @@ func (s *serviceServer) HandleLLMRequest(_ context.Context, req *sdkv1.HandleLLM
 		}
 		if pr != nil {
 			resp.SystemPrompt = pr.SystemPrompt
+			resp.UserPrompt = pr.UserPrompt
 			resp.Stop = pr.Stop
 		}
 		resp.Result = eventResult(true, resp.Stop)
@@ -734,14 +765,28 @@ func (s *serviceServer) ListTools(context.Context, *sdkv1.Empty) (*sdkv1.ListToo
 		return resp, nil
 	}
 	for _, t := range s.impl.Tools {
-		schema, err := json.Marshal(t.ParamsSchema)
-		if err != nil {
-			schema = []byte("{}")
-		}
 		resp.Tools = append(resp.Tools, &sdkv1.ToolDesc{
 			Name:        t.Name,
 			Description: t.Description,
-			ParamsJson:  schema,
+			ParamsJson:  marshalSchema(t.ParamsSchema),
+		})
+	}
+	return resp, nil
+}
+
+// ListWebApis returns the plugin's current Web API routes. Routes may be
+// registered during instantiation (after Register), so this is pulled live on
+// each call instead of being captured in the Register snapshot.
+func (s *serviceServer) ListWebApis(context.Context, *sdkv1.Empty) (*sdkv1.ListWebApisResponse, error) {
+	resp := &sdkv1.ListWebApisResponse{}
+	if s.impl == nil {
+		return resp, nil
+	}
+	for _, w := range s.impl.WebAPIs {
+		resp.WebApis = append(resp.WebApis, &sdkv1.WebApiDesc{
+			Route:       w.Route,
+			Methods:     w.Methods,
+			Description: w.Desc,
 		})
 	}
 	return resp, nil
@@ -753,7 +798,10 @@ func (s *serviceServer) HandleTool(_ context.Context, req *sdkv1.HandleToolReque
 	if s.impl == nil {
 		return resp, nil
 	}
-	e := eventFromJSON(req.EventJson)
+	e, err := eventFromJSONStrict(req.EventJson)
+	if err != nil {
+		return nil, err
+	}
 	args := map[string]any{}
 	if len(req.ArgsJson) > 0 {
 		if err := json.Unmarshal(req.ArgsJson, &args); err != nil {
@@ -833,9 +881,7 @@ func (s *serviceServer) SetLogLevel(_ context.Context, req *sdkv1.SetLogLevelReq
 func (s *serviceServer) GetConfigSchema(context.Context, *sdkv1.Empty) (*sdkv1.GetConfigSchemaResponse, error) {
 	var schema []byte
 	if s.impl != nil {
-		if b, err := json.Marshal(s.impl.ConfigSchema); err == nil {
-			schema = b
-		}
+		schema = marshalSchema(s.impl.ConfigSchema)
 	}
 	return &sdkv1.GetConfigSchemaResponse{SchemaJson: schema}, nil
 }
@@ -853,6 +899,9 @@ func (s *serviceServer) FeedSessionWait(_ context.Context, req *sdkv1.FeedSessio
 	if umo == "" {
 		return &sdkv1.FeedSessionWaitResponse{Handled: false}, nil
 	}
+	// take 之后再按结果处理，避免"先删后调"：panic 终止等待并注销宿主侧
+	// 登记；handled=true 消费掉并注销宿主侧登记；handled=false 放回等待
+	// 下一条匹配事件。
 	if w := s.impl.takeSessionWait(umo); w != nil && w.Handler != nil {
 		handled := false
 		if err := safeErr(func() error {
@@ -860,11 +909,35 @@ func (s *serviceServer) FeedSessionWait(_ context.Context, req *sdkv1.FeedSessio
 			return nil
 		}); err != nil {
 			logService().Error("FeedSessionWait: wait handler panic", "umo", umo, "error", err)
+			s.notifyHostWaitConsumed(w)
 			return &sdkv1.FeedSessionWaitResponse{Handled: false}, nil
 		}
-		return &sdkv1.FeedSessionWaitResponse{Handled: handled}, nil
+		if handled {
+			s.notifyHostWaitConsumed(w)
+			return &sdkv1.FeedSessionWaitResponse{Handled: true}, nil
+		}
+		// 未消费：重新放回，等待下一条匹配事件。
+		s.impl.putSessionWait(w)
+		return &sdkv1.FeedSessionWaitResponse{Handled: false}, nil
 	}
 	return &sdkv1.FeedSessionWaitResponse{Handled: false}, nil
+}
+
+// notifyHostWaitConsumed 尽力注销宿主侧登记的会话等待（panic/已消费时
+// 调用），避免宿主继续为已终止的等待推送事件造成僵尸推送。失败仅日志。
+func (s *serviceServer) notifyHostWaitConsumed(w *SessionWait) {
+	if w == nil {
+		return
+	}
+	svc, err := hostServiceClient()
+	if err != nil {
+		return
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	if _, rerr := svc.UnregisterSessionWait(ctx, &sdkv1.UnregisterSessionWaitRequest{WaitId: w.WaitID}); rerr != nil {
+		logService().Warn("notifyHostWaitConsumed: 注销宿主等待失败", "umo", w.UMO, "err", rerr)
+	}
 }
 
 // webRoute 是 webRoutePattern 的缓存结果（正则 + 动态段名）。
@@ -874,7 +947,11 @@ type webRoute struct {
 }
 
 // webRouteCache 缓存 route → 编译结果，避免每个请求都重新编译正则。
-// 正则表达式是确定的，路由集合在 Register 后固定，缓存无需失效。
+// 正则只由路由字符串决定，同字符串永远是同一正则，缓存无需失效；但宿主
+// 的路由表取自 Register 快照，因此 WebAPIs 必须在 Serve（Register）前
+// 固定——运行时修改 impl.WebAPIs（增删/改 Route）不会反映到宿主已注册
+// 的路由表，仅当宿主主动重新读取时（本 RPC 实时遍历 impl.WebAPIs）才
+// 对新 Route 生效。
 var (
 	routeParamRe    = regexp.MustCompile(`<([^>]+)>`)
 	routeSegmentRe  = regexp.MustCompile(`^<[^>]+>$`)
@@ -948,7 +1025,12 @@ func (s *serviceServer) HandleWebRequest(_ context.Context, req *sdkv1.HandleWeb
 	method := strings.ToUpper(req.Method)
 	for _, w := range s.impl.WebAPIs {
 		match := false
-		for _, m := range w.Methods {
+		// 漏填 Methods 时规范为 ANY，避免路由静默 404。
+		methods := w.Methods
+		if len(methods) == 0 {
+			methods = []string{"ANY"}
+		}
+		for _, m := range methods {
 			if strings.EqualFold(m, method) || strings.EqualFold(m, "ANY") {
 				match = true
 				break
@@ -993,11 +1075,17 @@ func (s *serviceServer) HandleWebRequest(_ context.Context, req *sdkv1.HandleWeb
 			handlerErr = cerr
 		}
 		if handlerErr != nil {
-			errBody, _ := json.Marshal(map[string]string{"status": "error", "message": handlerErr.Error()})
+			// 错误原文（panic 时含完整堆栈）只进日志，不回显给 HTTP 客户端。
+			logService().Error("WebAPI handler failed", "route", w.Route, "error", handlerErr)
+			errBody, _ := json.Marshal(map[string]string{"status": "error", "message": "internal error"})
 			return &sdkv1.HandleWebRequestResponse{
 				StatusCode: 500,
 				Body:       errBody,
 			}, nil
+		}
+		// status=0（零值）等非法状态归一为 200。
+		if status < 100 || status > 599 {
+			status = 200
 		}
 		out := &sdkv1.HandleWebRequestResponse{StatusCode: int32(status), Body: body}
 		for k, v := range respHeaders {
@@ -1017,6 +1105,8 @@ func (s *serviceServer) Cleanup(context.Context, *sdkv1.Empty) (*sdkv1.Empty, er
 }
 
 // eventFromJSON decodes a serialized Event, tolerating empty/invalid payloads.
+// 损坏时返回零值 Event 并照常分发（fail-safe：基于 SenderID/IsAdmin 的插件
+// 会得到空值，不会误用其他用户身份）。
 func eventFromJSON(b []byte) *Event {
 	if len(b) == 0 {
 		return &Event{}
@@ -1027,4 +1117,18 @@ func eventFromJSON(b []byte) *Event {
 		return &Event{}
 	}
 	return &e
+}
+
+// eventFromJSONStrict 是 eventFromJSON 的严格变体：损坏/空 payload 直接
+// 返回 InvalidArgument，供命令/工具等"事件必须可信"的入口使用，避免零值
+// Event（SenderID=""、IsAdmin=false）被当作真实事件分发。
+func eventFromJSONStrict(b []byte) (*Event, error) {
+	if len(b) == 0 {
+		return &Event{}, nil
+	}
+	var e Event
+	if err := json.Unmarshal(b, &e); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "event_json decode failed: %v", err)
+	}
+	return &e, nil
 }

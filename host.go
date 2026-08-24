@@ -34,6 +34,11 @@ var (
 	hostSvc      sdkv1.HostServiceClient
 	hostConn     *grpc.ClientConn
 	hostDialDone bool
+
+	// hostDialMu 串行化实际拨号过程。hostMu 只保护缓存读写，拨号期间不持
+	// 锁：否则一次卡住的 Dial 会让所有反调方在锁上排队，把单点超时放大成
+	// 全局停摆。
+	hostDialMu sync.Mutex
 )
 
 // setBroker stores the go-plugin broker handed to GRPCServer so handlers can
@@ -66,15 +71,31 @@ func hostServiceClient() (sdkv1.HostServiceClient, error) {
 		return nil, errNoBroker
 	}
 
+	// 先查缓存（只读路径不持拨号锁，命中时零开销）。
 	hostMu.Lock()
-	defer hostMu.Unlock()
+	if hostDialDone && hostSvc != nil {
+		svc := hostSvc
+		hostMu.Unlock()
+		return svc, nil
+	}
+	hostMu.Unlock()
+
+	// 双检缓存后拨号：拨号过程只受 hostDialMu 保护，不持 hostMu，避免
+	// 卡住的 Dial 阻塞所有反调方。
+	hostDialMu.Lock()
+	defer hostDialMu.Unlock()
+	hostMu.Lock()
+	if hostDialDone && hostSvc != nil {
+		svc := hostSvc
+		hostMu.Unlock()
+		return svc, nil
+	}
+	hostMu.Unlock()
+
 	// Only cache SUCCESS: a transient dial failure (e.g. host broker not ready
 	// yet) must not poison the plugin for its whole lifetime, otherwise every
 	// reverse call (GetConfig/ChatLLM/...) fails forever and plugins fall back
 	// to default config (the 401 symptom).
-	if hostDialDone && hostSvc != nil {
-		return hostSvc, nil
-	}
 	conn, err := b.DialWithOptions(HostServiceAppID,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(
@@ -84,9 +105,11 @@ func hostServiceClient() (sdkv1.HostServiceClient, error) {
 	if err != nil {
 		return nil, err
 	}
+	hostMu.Lock()
 	hostConn = conn
 	hostSvc = sdkv1.NewHostServiceClient(conn)
 	hostDialDone = true
+	hostMu.Unlock()
 	return hostSvc, nil
 }
 
@@ -99,12 +122,23 @@ func (e *hostUnavailableError) Error() string { return e.msg }
 // hostRPCTimeout 是插件→宿主反向调用的默认超时。宿主 hook 是第三方代码，
 // 卡死时插件 handler 不能无限阻塞（26-7），与 python-sdk 的 30-180s
 // timeout 对齐。
-const hostRPCTimeout = 30 * time.Second
+const (
+	hostRPCTimeout = 30 * time.Second
+	// hostLLMTimeout 是 LLM/渲染类长操作的超时：LLM 生成（工具循环、长
+	// 上下文、推理模型）普遍超过 30s，不能走普通 RPC 的短超时。
+	hostLLMTimeout = 180 * time.Second
+)
 
 // hostRPCCtx 返回带默认超时的上下文，供 Host API 内部 RPC 使用。调用方必须
 // defer cancel() 释放定时器。
 func hostRPCCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), hostRPCTimeout)
+}
+
+// hostLLMRPCCtx 返回带长超时的上下文，供 ChatLLM/TextToImage/HtmlRender 等
+// 长操作 RPC 使用。调用方必须 defer cancel() 释放定时器。
+func hostLLMRPCCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), hostLLMTimeout)
 }
 
 // Host is the plugin-facing reverse-call API into the AstrBot host process.
@@ -236,7 +270,7 @@ func (h *host) ChatLLMFull(req *sdkv1.ChatLLMRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ctx, cancel := hostRPCCtx()
+	ctx, cancel := hostLLMRPCCtx()
 	defer cancel()
 	resp, err := svc.ChatLLM(ctx, req)
 	if err != nil {
@@ -280,7 +314,7 @@ func (h *host) TextToImage(text, templateName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ctx, cancel := hostRPCCtx()
+	ctx, cancel := hostLLMRPCCtx()
 	defer cancel()
 	resp, err := svc.TextToImage(ctx, &sdkv1.TextToImageRequest{
 		Text:         text,
@@ -299,7 +333,7 @@ func (h *host) HtmlRender(template, data, options string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ctx, cancel := hostRPCCtx()
+	ctx, cancel := hostLLMRPCCtx()
 	defer cancel()
 	resp, err := svc.HtmlRender(ctx, &sdkv1.HtmlRenderRequest{
 		Template: template,
@@ -504,23 +538,27 @@ func (s *hostServiceServer) requireIdentity() error {
 // hostServers 连接登记与 ChatLLM/CallAction 限流窗口，避免表只增不减
 // （26-3）。connKey 是 accept 时刻的 manifest id（hostServers 的 key）；
 // 若期间经 BindHostServiceName 更新了注册名，限流表还可能有注册名条目，
-// 一并清理。
-func dropPluginHostState(connKey string) {
+// 一并清理。srv 用于归属比对：仅当 hostServers[connKey] 仍指向本连接时才
+// 删除，避免重载竞态下旧连接 Close 误删后继连接的登记。
+func dropPluginHostState(connKey string, srv *hostServiceServer) {
 	if connKey == "" {
 		return
 	}
 	registered := ""
 	hostServersMu.Lock()
-	if s, ok := hostServers[connKey]; ok {
-		registered = s.identity()
+	cur, ok := hostServers[connKey]
+	if ok && cur == srv {
+		registered = srv.identity()
 		delete(hostServers, connKey)
 	}
 	hostServersMu.Unlock()
-	chatLLMRate.drop(connKey)
-	callActionRate.drop(connKey)
-	if registered != "" && registered != connKey {
-		chatLLMRate.drop(registered)
-		callActionRate.drop(registered)
+	if !ok || cur == srv { // 无后继连接（或登记仍属本连接）时才清理限流
+		chatLLMRate.drop(connKey)
+		callActionRate.drop(connKey)
+		if registered != "" && registered != connKey {
+			chatLLMRate.drop(registered)
+			callActionRate.drop(registered)
+		}
 	}
 }
 
@@ -542,6 +580,13 @@ func acceptHostService(b *plugin.GRPCBroker, id uint32) (*grpc.Server, net.Liste
 	// connKey 保留 accept 时刻的 manifest id（hostServers 表的 key），
 	// 供连接关闭时清理 hostServers/限流表残留（26-3）。
 	pid := currentHostPluginID()
+	if pid == "" {
+		hostServiceLoggerMu.RLock()
+		logger := hostServiceLogger
+		hostServiceLoggerMu.RUnlock()
+		logger.Warn("acceptHostService: 宿主未设置当前插件 id（SetCurrentHostPluginID 未调用），" +
+			"本连接身份为空，控制面 RPC（GetConfig/SetConfig 等）将被拒绝")
+	}
 	server := &hostServiceServer{pluginID: pid, connKey: pid}
 	// 记录连接→插件 id，供 Register 后用注册名更新身份。
 	if pid != "" {
@@ -570,6 +615,14 @@ type hostServiceServer struct {
 	// connKey 是 accept 时刻的 manifest id，hostServers 表以此作为 key；
 	// 连接关闭时用于清理 hostServers 与限流表条目（26-3）。
 	connKey string
+	// sessionWaitMu 保护 sessionWaitIDs / sessionWaitHasID。
+	sessionWaitMu sync.Mutex
+	// sessionWaitIDs 是本连接注册到宿主的 wait_id 集合，Unregister 时据此
+	// 做归属校验，防止枚举他人 wait_id 跨插件注销。
+	sessionWaitIDs map[string]struct{}
+	// sessionWaitHasID 标记宿主是否曾返回非空 wait_id（支持 wait_id 特性）；
+	// 为 false 时（宿主不支持）放宽为不做归属校验，保持旧行为兼容。
+	sessionWaitHasID bool
 }
 
 // identity 返回当前连接身份（带锁读 pluginID）。
@@ -637,7 +690,10 @@ func (s *hostServiceServer) CallAction(_ context.Context, req *sdkv1.CallActionR
 	}
 	params := map[string]any{}
 	if len(req.ParamsJson) > 0 {
-		warnJSON("CallAction params_json", json.Unmarshal(req.ParamsJson, &params))
+		if err := json.Unmarshal(req.ParamsJson, &params); err != nil {
+			warnJSON("CallAction params_json", err)
+			return nil, status.Errorf(codes.InvalidArgument, "params_json decode failed: %v", err)
+		}
 	}
 	result, err := h.CallAction(req.Platform, req.Api, params)
 	if err != nil {
@@ -657,7 +713,10 @@ func (s *hostServiceServer) SendMessage(_ context.Context, req *sdkv1.SendMessag
 	}
 	var chain []Component
 	if len(req.ChainJson) > 0 {
-		warnJSON("SendMessage chain_json", json.Unmarshal(req.ChainJson, &chain))
+		if err := json.Unmarshal(req.ChainJson, &chain); err != nil {
+			warnJSON("SendMessage chain_json", err)
+			return nil, status.Errorf(codes.InvalidArgument, "chain_json decode failed: %v", err)
+		}
 	}
 	if err := h.SendMessage(req.Platform, req.SessionId, chain); err != nil {
 		return nil, err
@@ -750,10 +809,12 @@ func (r *rateTable) allow(id string) bool {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	now := time.Now()
+	// 窗口对齐整分钟（now.Truncate），避免任意起点使窗口尾+新窗口头
+	// 各计满 maxPer，边界突刺达 2 倍上限。
+	bucket := time.Now().Truncate(time.Minute)
 	e := r.table[id]
-	if e.window.IsZero() || now.Sub(e.window) >= time.Minute {
-		e.window = now
+	if !e.window.Equal(bucket) {
+		e.window = bucket
 		e.count = 0
 	}
 	e.count++
@@ -789,15 +850,23 @@ var chatLLMRate = &rateTable{maxPer: maxChatLLMPerMinute, table: map[string]rate
 // 是高频平台 API 入口，同样可能被滥用。
 var callActionRate = &rateTable{maxPer: maxChatLLMPerMinute, table: map[string]rateWindow{}}
 
-// SetChatLLMRateLimit 调整每插件每分钟 ChatLLM 反向调用上限（<=0 表示关闭
-// 限流），供宿主在启动前配置（26-6，原 maxChatLLMPerMinute 硬编码）。
-// 未调用时默认 30。返回设置前的旧值。
+// SetChatLLMRateLimit 调整每插件每分钟 ChatLLM 与 CallAction 反向调用上限
+// （两者同源共用一份配置，26-6），供宿主在启动前配置。未调用时默认 30。
+// 返回设置前的旧值。
 func SetChatLLMRateLimit(perMinute int) int {
-	chatLLMRate.mu.Lock()
-	defer chatLLMRate.mu.Unlock()
-	old := chatLLMRate.maxPer
+	old := setRateLimit(chatLLMRate, perMinute)
+	setRateLimit(callActionRate, perMinute)
+	return old
+}
+
+// setRateLimit 设置单个限流表的每插件每分钟上限（<=0 保持原值不变，
+// 即不提供关闭限流的开关）。
+func setRateLimit(r *rateTable, perMinute int) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	old := r.maxPer
 	if perMinute > 0 {
-		chatLLMRate.maxPer = perMinute
+		r.maxPer = perMinute
 	}
 	return old
 }
@@ -864,6 +933,11 @@ func (s *hostServiceServer) GetCurrConversationID(_ context.Context, req *sdkv1.
 }
 
 func (s *hostServiceServer) NewConversation(_ context.Context, req *sdkv1.NewConversationRequest) (*sdkv1.ConversationIDResponse, error) {
+	// 新建会话会"设为当前"，等效于重置该用户的对话上下文，与其他会话
+	// 变更 RPC 一致地要求绑定身份。
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
 	h := getHostHooks()
 	if h.NewConversation == nil {
 		return &sdkv1.ConversationIDResponse{}, nil
@@ -884,6 +958,14 @@ func (s *hostServiceServer) GetConversation(_ context.Context, req *sdkv1.GetCon
 }
 
 func (s *hostServiceServer) GetConversations(_ context.Context, req *sdkv1.GetConversationsRequest) (*sdkv1.ConversationsResponse, error) {
+	// 会话含完整聊天历史，属隐私敏感数据：要求绑定身份，且禁止经插件
+	// RPC 全量列举（空 umo = 所有用户/平台的全部会话）。
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	if req.UnifiedMsgOrigin == "" {
+		return nil, status.Error(codes.PermissionDenied, "listing all conversations is not allowed over the plugin RPC")
+	}
 	h := getHostHooks()
 	if h.GetConversations == nil {
 		return &sdkv1.ConversationsResponse{}, nil
@@ -1116,6 +1198,11 @@ func (s *hostServiceServer) SetPluginEnabled(_ context.Context, req *sdkv1.SetPl
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
+	// 目标校验：插件只能启停自身，操作其他插件须在管理员名单内（26-2）。
+	if req.PluginName != s.identity() && !hostAdminAuthorized(s.identity()) {
+		return nil, status.Errorf(codes.PermissionDenied,
+			"插件 %q 无权操作插件 %q（仅允许操作自身，或经宿主授权的管理插件）", s.identity(), req.PluginName)
+	}
 	h := getHostHooks()
 	if h.SetPluginEnabled == nil {
 		return &sdkv1.Empty{}, nil
@@ -1127,8 +1214,13 @@ func (s *hostServiceServer) SetPluginEnabled(_ context.Context, req *sdkv1.SetPl
 }
 
 func (s *hostServiceServer) InstallPlugin(_ context.Context, req *sdkv1.InstallPluginRequest) (*sdkv1.Empty, error) {
+	// 安装接受任意 git/url 源，等价于把 RCE 安装面暴露给插件，只允许
+	// 管理员名单内的插件执行。
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
+	}
+	if !hostAdminAuthorized(s.identity()) {
+		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权安装插件（需宿主授权为管理插件）", s.identity())
 	}
 	h := getHostHooks()
 	if h.InstallPlugin == nil {
@@ -1143,6 +1235,10 @@ func (s *hostServiceServer) InstallPlugin(_ context.Context, req *sdkv1.InstallP
 func (s *hostServiceServer) UninstallPlugin(_ context.Context, req *sdkv1.UninstallPluginRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
+	}
+	// 卸载只允许管理员名单内的插件执行（自身也在名单内时受同一约束）。
+	if !hostAdminAuthorized(s.identity()) {
+		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权卸载插件（需宿主授权为管理插件）", s.identity())
 	}
 	h := getHostHooks()
 	if h.UninstallPlugin == nil {
@@ -1169,6 +1265,17 @@ func (s *hostServiceServer) RegisterSessionWait(_ context.Context, req *sdkv1.Re
 		return &sdkv1.RegisterSessionWaitResponse{}, nil
 	}
 	waitID := h.RegisterSessionWait(s.identity(), req.Umo, req.TimeoutSeconds)
+	// 记录本连接注册的 wait_id 供 Unregister 归属校验；宿主返回非空 id
+	// 视为支持 wait_id 特性，此后启用严格校验。
+	s.sessionWaitMu.Lock()
+	if s.sessionWaitIDs == nil {
+		s.sessionWaitIDs = map[string]struct{}{}
+	}
+	s.sessionWaitIDs[waitID] = struct{}{}
+	if waitID != "" {
+		s.sessionWaitHasID = true
+	}
+	s.sessionWaitMu.Unlock()
 	return &sdkv1.RegisterSessionWaitResponse{WaitId: waitID}, nil
 }
 
@@ -1177,6 +1284,15 @@ func (s *hostServiceServer) UnregisterSessionWait(_ context.Context, req *sdkv1.
 	// 对齐 RegisterSessionWait 的控制面最小鉴权：注销等待同样需要绑定身份。
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
+	}
+	// 归属校验：wait_id 特性启用后，只允许注销本连接注册过的 wait_id，
+	// 防止枚举他人 wait_id 跨插件注销（26-5）。
+	s.sessionWaitMu.Lock()
+	_, owned := s.sessionWaitIDs[req.WaitId]
+	strict := s.sessionWaitHasID
+	s.sessionWaitMu.Unlock()
+	if strict && !owned {
+		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权注销未注册的 wait_id", s.identity())
 	}
 	h := getHostHooks()
 	if h.UnregisterSessionWait == nil {
@@ -1204,8 +1320,12 @@ func (s *hostServiceServer) RegisterBridgeHook(_ context.Context, req *sdkv1.Bri
 	return &sdkv1.Empty{}, nil
 }
 
-// UnregisterBridgeHook 注销插件到宿主的桥接钩子。
+// UnregisterBridgeHook 注销插件到宿主的桥接钩子。与 Register 对称地要求
+// 绑定身份：匿名连接不得注销任何钩子。
 func (s *hostServiceServer) UnregisterBridgeHook(_ context.Context, req *sdkv1.BridgeHookRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
 	h := getHostHooks()
 	if h.UnregisterBridgeHook == nil {
 		return &sdkv1.Empty{}, nil
@@ -1219,3 +1339,33 @@ func (s *hostServiceServer) UnregisterBridgeHook(_ context.Context, req *sdkv1.B
 // maxChatLLMPerMinute 每插件每分钟 ChatLLM/CallAction 反向调用上限的默认值。
 // 宿主可在启动前经 SetChatLLMRateLimit 覆盖（26-6）。
 const maxChatLLMPerMinute = 30
+
+// hostAdminList 是获准执行插件管理操作（SetPluginEnabled 操作他插件、
+// InstallPlugin/UninstallPlugin）的插件名单，由宿主在启动前经
+// SetPluginAdminList 配置。空名单表示无管理员插件（默认仅允许插件操作
+// 自身）。
+var (
+	hostAdminListMu sync.RWMutex
+	hostAdminList   = map[string]struct{}{}
+)
+
+// SetPluginAdminList 设置可执行插件管理操作的插件名单（宿主在启动插件前
+// 调用；不调用则默认无管理员插件）。传 nil/空切片清空名单。
+func SetPluginAdminList(names []string) {
+	hostAdminListMu.Lock()
+	hostAdminList = make(map[string]struct{}, len(names))
+	for _, n := range names {
+		if n != "" {
+			hostAdminList[n] = struct{}{}
+		}
+	}
+	hostAdminListMu.Unlock()
+}
+
+// hostAdminAuthorized 报告插件名是否在管理员名单中。
+func hostAdminAuthorized(pluginName string) bool {
+	hostAdminListMu.RLock()
+	defer hostAdminListMu.RUnlock()
+	_, ok := hostAdminList[pluginName]
+	return ok
+}

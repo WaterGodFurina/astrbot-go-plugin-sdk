@@ -220,6 +220,9 @@ type SessionWait struct {
 	// UMO is the unified message origin this wait listens on
 	// (e.g. "aiocqhttp:GroupMessage:123").
 	UMO string
+	// WaitID 是宿主 RegisterSessionWait 返回的凭据；Unregister 时回传，
+	// 宿主据此做归属校验。空表示宿主不支持或注册失败。
+	WaitID string
 	// Handler consumes the matched event. Returning true marks the event as
 	// handled (consumed); false lets it fall through to normal handling.
 	Handler func(e *Event) bool
@@ -239,15 +242,22 @@ func (p *Plugin) RegisterSessionWait(umo string, timeoutSec int, handler func(e 
 	p.sessionWaits[umo] = w
 	p.sessionWaitsMu.Unlock()
 
-	// 反向告知宿主注册等待；失败时仅日志（宿主不支持该特性时返回空 wait_id）。
-	if svc, err := hostServiceClient(); err == nil {
+	// 反向告知宿主注册等待；失败时打 Warn（宿主不支持该特性时返回空 wait_id）。
+	if svc, err := hostServiceClient(); err != nil {
+		logService().Warn("RegisterSessionWait 无法连接宿主 HostService，等待可能永远不会触发（是否在 OnLoad 中过早注册？）",
+			"umo", umo, "err", err)
+	} else {
 		ctx, cancel := hostRPCCtx()
 		defer cancel()
-		if _, rerr := svc.RegisterSessionWait(ctx, &sdkv1.RegisterSessionWaitRequest{
+		if resp, rerr := svc.RegisterSessionWait(ctx, &sdkv1.RegisterSessionWaitRequest{
 			Umo:            umo,
 			TimeoutSeconds: int32(timeoutSec),
 		}); rerr != nil {
 			logService().Warn("RegisterSessionWait 上报宿主失败", "umo", umo, "err", rerr)
+		} else if resp != nil {
+			p.sessionWaitsMu.Lock()
+			w.WaitID = resp.GetWaitId()
+			p.sessionWaitsMu.Unlock()
 		}
 	}
 	return w
@@ -256,12 +266,18 @@ func (p *Plugin) RegisterSessionWait(umo string, timeoutSec int, handler func(e 
 // UnregisterSessionWait removes a previously registered session wait for umo.
 func (p *Plugin) UnregisterSessionWait(umo string) {
 	p.sessionWaitsMu.Lock()
+	w := p.sessionWaits[umo]
 	delete(p.sessionWaits, umo)
 	p.sessionWaitsMu.Unlock()
+	// 优先回传宿主发放的 wait_id（归属校验凭据）；无凭据时回退 umo。
+	waitID := umo
+	if w != nil && w.WaitID != "" {
+		waitID = w.WaitID
+	}
 	if svc, err := hostServiceClient(); err == nil {
 		ctx, cancel := hostRPCCtx()
 		defer cancel()
-		if _, rerr := svc.UnregisterSessionWait(ctx, &sdkv1.UnregisterSessionWaitRequest{WaitId: umo}); rerr != nil {
+		if _, rerr := svc.UnregisterSessionWait(ctx, &sdkv1.UnregisterSessionWaitRequest{WaitId: waitID}); rerr != nil {
 			logService().Warn("UnregisterSessionWait 上报宿主失败", "umo", umo, "err", rerr)
 		}
 	}
@@ -282,6 +298,20 @@ func (p *Plugin) takeSessionWait(umo string) *SessionWait {
 	}
 	delete(p.sessionWaits, umo)
 	return w
+}
+
+// putSessionWait 把被 takeSessionWait 取走的等待放回注册表（handler 未消费
+// 该事件时恢复等待，继续匹配下一条）。
+func (p *Plugin) putSessionWait(w *SessionWait) {
+	if w == nil {
+		return
+	}
+	p.sessionWaitsMu.Lock()
+	if p.sessionWaits == nil {
+		p.sessionWaits = map[string]*SessionWait{}
+	}
+	p.sessionWaits[w.UMO] = w
+	p.sessionWaitsMu.Unlock()
 }
 
 // unifiedMsgOriginOf builds the plugin-facing unified message origin
