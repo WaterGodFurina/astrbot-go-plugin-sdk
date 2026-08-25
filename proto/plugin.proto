@@ -164,6 +164,9 @@ service HostService {
   // 权限/描述）。子进程架构下插件自身进程的 star 注册表只含自己的
   // handler，helps 类插件需经宿主查询全局指令列表。
   rpc ListCommandDescriptors(Empty) returns (CommandDescriptorsResponse);
+  // ListPlatforms 返回全部已加载平台实例元数据（id/type/name/display_name/
+  // config），供插件（如群分析类）发现平台并创建跨进程 bot 代理。
+  rpc ListPlatforms(Empty) returns (PlatformsResponse);
 
   // ── 会话等待（SessionWaiter 跨进程喂入）──
   // 插件注册"等待某 umo 的下一条消息"（session_waiter.register_wait）。
@@ -701,6 +704,19 @@ message CommandDescriptorPayload {
 
 message CommandDescriptorsResponse {
   repeated bytes descriptors_json = 1; // JSON of CommandDescriptorPayload
+}
+
+// 单条平台实例元数据（JSON 序列化承载）。
+message PlatformPayload {
+  string id = 1;           // 实例 ID（如 "default"）
+  string type = 2;         // 平台类型（如 "aiocqhttp"）
+  string name = 3;         // 类型名（同 type）
+  string display_name = 4; // 展示名
+  bytes config_json = 5;   // 平台配置 JSON（appid 等）
+}
+
+message PlatformsResponse {
+  repeated bytes platforms_json = 1; // JSON of PlatformPayload
 }
 
 message StarResponse {

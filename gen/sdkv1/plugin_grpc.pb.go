@@ -755,6 +755,7 @@ const (
 	HostService_InstallPlugin_FullMethodName               = "/astrbot.sdk.v1.HostService/InstallPlugin"
 	HostService_UninstallPlugin_FullMethodName             = "/astrbot.sdk.v1.HostService/UninstallPlugin"
 	HostService_ListCommandDescriptors_FullMethodName      = "/astrbot.sdk.v1.HostService/ListCommandDescriptors"
+	HostService_ListPlatforms_FullMethodName               = "/astrbot.sdk.v1.HostService/ListPlatforms"
 	HostService_RegisterSessionWait_FullMethodName         = "/astrbot.sdk.v1.HostService/RegisterSessionWait"
 	HostService_UnregisterSessionWait_FullMethodName       = "/astrbot.sdk.v1.HostService/UnregisterSessionWait"
 	HostService_RegisterBridgeHook_FullMethodName          = "/astrbot.sdk.v1.HostService/RegisterBridgeHook"
@@ -837,6 +838,9 @@ type HostServiceClient interface {
 	// 权限/描述）。子进程架构下插件自身进程的 star 注册表只含自己的
 	// handler，helps 类插件需经宿主查询全局指令列表。
 	ListCommandDescriptors(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*CommandDescriptorsResponse, error)
+	// ListPlatforms 返回全部已加载平台实例元数据（id/type/name/display_name/
+	// config），供插件（如群分析类）发现平台并创建跨进程 bot 代理。
+	ListPlatforms(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*PlatformsResponse, error)
 	// ── 会话等待（SessionWaiter 跨进程喂入）──
 	// 插件注册"等待某 umo 的下一条消息"（session_waiter.register_wait）。
 	// 宿主收到该 umo 的消息时经 PluginService.FeedSessionWait 推送事件。
@@ -1166,6 +1170,16 @@ func (c *hostServiceClient) ListCommandDescriptors(ctx context.Context, in *Empt
 	return out, nil
 }
 
+func (c *hostServiceClient) ListPlatforms(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*PlatformsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PlatformsResponse)
+	err := c.cc.Invoke(ctx, HostService_ListPlatforms_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *hostServiceClient) RegisterSessionWait(ctx context.Context, in *RegisterSessionWaitRequest, opts ...grpc.CallOption) (*RegisterSessionWaitResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RegisterSessionWaitResponse)
@@ -1282,6 +1296,9 @@ type HostServiceServer interface {
 	// 权限/描述）。子进程架构下插件自身进程的 star 注册表只含自己的
 	// handler，helps 类插件需经宿主查询全局指令列表。
 	ListCommandDescriptors(context.Context, *Empty) (*CommandDescriptorsResponse, error)
+	// ListPlatforms 返回全部已加载平台实例元数据（id/type/name/display_name/
+	// config），供插件（如群分析类）发现平台并创建跨进程 bot 代理。
+	ListPlatforms(context.Context, *Empty) (*PlatformsResponse, error)
 	// ── 会话等待（SessionWaiter 跨进程喂入）──
 	// 插件注册"等待某 umo 的下一条消息"（session_waiter.register_wait）。
 	// 宿主收到该 umo 的消息时经 PluginService.FeedSessionWait 推送事件。
@@ -1393,6 +1410,9 @@ func (UnimplementedHostServiceServer) UninstallPlugin(context.Context, *Uninstal
 }
 func (UnimplementedHostServiceServer) ListCommandDescriptors(context.Context, *Empty) (*CommandDescriptorsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListCommandDescriptors not implemented")
+}
+func (UnimplementedHostServiceServer) ListPlatforms(context.Context, *Empty) (*PlatformsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListPlatforms not implemented")
 }
 func (UnimplementedHostServiceServer) RegisterSessionWait(context.Context, *RegisterSessionWaitRequest) (*RegisterSessionWaitResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RegisterSessionWait not implemented")
@@ -1985,6 +2005,24 @@ func _HostService_ListCommandDescriptors_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HostService_ListPlatforms_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).ListPlatforms(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_ListPlatforms_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).ListPlatforms(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _HostService_RegisterSessionWait_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RegisterSessionWaitRequest)
 	if err := dec(in); err != nil {
@@ -2187,6 +2225,10 @@ var HostService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListCommandDescriptors",
 			Handler:    _HostService_ListCommandDescriptors_Handler,
+		},
+		{
+			MethodName: "ListPlatforms",
+			Handler:    _HostService_ListPlatforms_Handler,
 		},
 		{
 			MethodName: "RegisterSessionWait",

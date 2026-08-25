@@ -454,6 +454,9 @@ type HostServiceHooks struct {
 	// ListCommandDescriptors 返回全部插件的命令描述符（JSON 序列化，
 	// 含插件名/命令/别名/描述/权限/子命令/组），helps 类插件跨进程枚举指令。
 	ListCommandDescriptors func() []map[string]any
+	// ListPlatforms 返回全部已加载平台实例元数据（JSON 序列化，含
+	// id/type/name/display_name/config），群分析类插件发现平台。
+	ListPlatforms func() []map[string]any
 
 	// ── 会话等待（SessionWaiter）──
 	// RegisterSessionWait 注册插件对 umo 的等待，返回 wait_id（空 = 不支持）。
@@ -1268,6 +1271,22 @@ func (s *hostServiceServer) ListCommandDescriptors(_ context.Context, _ *sdkv1.E
 			return nil, err
 		}
 		resp.DescriptorsJson = append(resp.DescriptorsJson, out)
+	}
+	return resp, nil
+}
+
+func (s *hostServiceServer) ListPlatforms(_ context.Context, _ *sdkv1.Empty) (*sdkv1.PlatformsResponse, error) {
+	h := getHostHooks()
+	if h.ListPlatforms == nil {
+		return &sdkv1.PlatformsResponse{}, nil
+	}
+	resp := &sdkv1.PlatformsResponse{}
+	for _, p := range h.ListPlatforms() {
+		out, err := json.Marshal(p)
+		if err != nil {
+			return nil, err
+		}
+		resp.PlatformsJson = append(resp.PlatformsJson, out)
 	}
 	return resp, nil
 }
