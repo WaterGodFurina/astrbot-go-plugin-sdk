@@ -160,6 +160,10 @@ service HostService {
   rpc InstallPlugin(InstallPluginRequest) returns (Empty);
   // UninstallPlugin 卸载插件。
   rpc UninstallPlugin(UninstallPluginRequest) returns (Empty);
+  // ListCommandDescriptors 返回全部插件的命令描述符（含子命令/组/别名/
+  // 权限/描述）。子进程架构下插件自身进程的 star 注册表只含自己的
+  // handler，helps 类插件需经宿主查询全局指令列表。
+  rpc ListCommandDescriptors(Empty) returns (CommandDescriptorsResponse);
 
   // ── 会话等待（SessionWaiter 跨进程喂入）──
   // 插件注册"等待某 umo 的下一条消息"（session_waiter.register_wait）。
@@ -678,6 +682,25 @@ message GetStarRequest {
 
 message StarsResponse {
   repeated bytes stars_json = 1; // JSON of StarPayload
+}
+
+// 单条命令描述符（JSON 序列化承载，对齐宿主 star.CommandDescriptor）。
+message CommandDescriptorPayload {
+  string plugin_name = 1;       // 归属插件 id（如 astrbot_plugin_xxx_python）
+  string handler_full_name = 2; // 宿主注册表全名
+  string handler_name = 3;      // 命令 handler 名
+  string command = 4;           // 有效命令（组命令为组名）
+  repeated string aliases = 5;  // 别名（不含父组前缀）
+  string description = 6;
+  string permission = 7;        // "admin" | "member"
+  bool enabled = 8;
+  string parent_group = 9;      // 子命令的父组名（非子命令为空）
+  bool is_sub_command = 10;
+  string command_type = 11;     // "group" 或空
+}
+
+message CommandDescriptorsResponse {
+  repeated bytes descriptors_json = 1; // JSON of CommandDescriptorPayload
 }
 
 message StarResponse {

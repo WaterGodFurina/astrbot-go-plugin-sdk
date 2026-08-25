@@ -451,6 +451,9 @@ type HostServiceHooks struct {
 	InstallPlugin func(repo string) error
 	// UninstallPlugin 卸载插件。
 	UninstallPlugin func(pluginName string) error
+	// ListCommandDescriptors 返回全部插件的命令描述符（JSON 序列化，
+	// 含插件名/命令/别名/描述/权限/子命令/组），helps 类插件跨进程枚举指令。
+	ListCommandDescriptors func() []map[string]any
 
 	// ── 会话等待（SessionWaiter）──
 	// RegisterSessionWait 注册插件对 umo 的等待，返回 wait_id（空 = 不支持）。
@@ -1248,6 +1251,25 @@ func (s *hostServiceServer) UninstallPlugin(_ context.Context, req *sdkv1.Uninst
 		return nil, err
 	}
 	return &sdkv1.Empty{}, nil
+}
+
+// ListCommandDescriptors returns JSON-serialized command descriptors for all
+// plugins (commands/sub-commands/groups/aliases/permission/description),
+// consumed by helps-like plugins that enumerate commands across processes.
+func (s *hostServiceServer) ListCommandDescriptors(_ context.Context, _ *sdkv1.Empty) (*sdkv1.CommandDescriptorsResponse, error) {
+	h := getHostHooks()
+	if h.ListCommandDescriptors == nil {
+		return &sdkv1.CommandDescriptorsResponse{}, nil
+	}
+	resp := &sdkv1.CommandDescriptorsResponse{}
+	for _, d := range h.ListCommandDescriptors() {
+		out, err := json.Marshal(d)
+		if err != nil {
+			return nil, err
+		}
+		resp.DescriptorsJson = append(resp.DescriptorsJson, out)
+	}
+	return resp, nil
 }
 
 // RegisterSessionWait registers a session wait for this plugin (the host
