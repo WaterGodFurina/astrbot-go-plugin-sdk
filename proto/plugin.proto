@@ -151,7 +151,7 @@ service HostService {
 
   // ── 插件/Star 管理（对齐 Python AstrBot star_manager）──
   // 列出全部已安装插件（Star 元数据）。
-  rpc ListStars(Empty) returns (StarsResponse);
+  rpc GetPluginRegistry(Empty) returns (StarsResponse);
   // 按插件名取 Star 元数据。
   rpc GetStar(GetStarRequest) returns (StarResponse);
   // 启用/禁用插件。

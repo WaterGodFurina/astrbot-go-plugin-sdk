@@ -749,7 +749,7 @@ const (
 	HostService_GetUsingProvider_FullMethodName            = "/astrbot.sdk.v1.HostService/GetUsingProvider"
 	HostService_SetProvider_FullMethodName                 = "/astrbot.sdk.v1.HostService/SetProvider"
 	HostService_GetProviderModels_FullMethodName           = "/astrbot.sdk.v1.HostService/GetProviderModels"
-	HostService_ListStars_FullMethodName                   = "/astrbot.sdk.v1.HostService/ListStars"
+	HostService_GetPluginRegistry_FullMethodName           = "/astrbot.sdk.v1.HostService/GetPluginRegistry"
 	HostService_GetStar_FullMethodName                     = "/astrbot.sdk.v1.HostService/GetStar"
 	HostService_SetPluginEnabled_FullMethodName            = "/astrbot.sdk.v1.HostService/SetPluginEnabled"
 	HostService_InstallPlugin_FullMethodName               = "/astrbot.sdk.v1.HostService/InstallPlugin"
@@ -825,7 +825,7 @@ type HostServiceClient interface {
 	GetProviderModels(ctx context.Context, in *GetProviderModelsRequest, opts ...grpc.CallOption) (*ProviderModelsResponse, error)
 	// ── 插件/Star 管理（对齐 Python AstrBot star_manager）──
 	// 列出全部已安装插件（Star 元数据）。
-	ListStars(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*StarsResponse, error)
+	GetPluginRegistry(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*StarsResponse, error)
 	// 按插件名取 Star 元数据。
 	GetStar(ctx context.Context, in *GetStarRequest, opts ...grpc.CallOption) (*StarResponse, error)
 	// 启用/禁用插件。
@@ -1110,10 +1110,10 @@ func (c *hostServiceClient) GetProviderModels(ctx context.Context, in *GetProvid
 	return out, nil
 }
 
-func (c *hostServiceClient) ListStars(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*StarsResponse, error) {
+func (c *hostServiceClient) GetPluginRegistry(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*StarsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(StarsResponse)
-	err := c.cc.Invoke(ctx, HostService_ListStars_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, HostService_GetPluginRegistry_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1283,7 +1283,7 @@ type HostServiceServer interface {
 	GetProviderModels(context.Context, *GetProviderModelsRequest) (*ProviderModelsResponse, error)
 	// ── 插件/Star 管理（对齐 Python AstrBot star_manager）──
 	// 列出全部已安装插件（Star 元数据）。
-	ListStars(context.Context, *Empty) (*StarsResponse, error)
+	GetPluginRegistry(context.Context, *Empty) (*StarsResponse, error)
 	// 按插件名取 Star 元数据。
 	GetStar(context.Context, *GetStarRequest) (*StarResponse, error)
 	// 启用/禁用插件。
@@ -1393,8 +1393,8 @@ func (UnimplementedHostServiceServer) SetProvider(context.Context, *SetProviderR
 func (UnimplementedHostServiceServer) GetProviderModels(context.Context, *GetProviderModelsRequest) (*ProviderModelsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetProviderModels not implemented")
 }
-func (UnimplementedHostServiceServer) ListStars(context.Context, *Empty) (*StarsResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ListStars not implemented")
+func (UnimplementedHostServiceServer) GetPluginRegistry(context.Context, *Empty) (*StarsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetPluginRegistry not implemented")
 }
 func (UnimplementedHostServiceServer) GetStar(context.Context, *GetStarRequest) (*StarResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetStar not implemented")
@@ -1897,20 +1897,20 @@ func _HostService_GetProviderModels_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
-func _HostService_ListStars_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _HostService_GetPluginRegistry_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(Empty)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(HostServiceServer).ListStars(ctx, in)
+		return srv.(HostServiceServer).GetPluginRegistry(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: HostService_ListStars_FullMethodName,
+		FullMethod: HostService_GetPluginRegistry_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(HostServiceServer).ListStars(ctx, req.(*Empty))
+		return srv.(HostServiceServer).GetPluginRegistry(ctx, req.(*Empty))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2203,8 +2203,8 @@ var HostService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _HostService_GetProviderModels_Handler,
 		},
 		{
-			MethodName: "ListStars",
-			Handler:    _HostService_ListStars_Handler,
+			MethodName: "GetPluginRegistry",
+			Handler:    _HostService_GetPluginRegistry_Handler,
 		},
 		{
 			MethodName: "GetStar",

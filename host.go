@@ -441,8 +441,8 @@ type HostServiceHooks struct {
 	GetProviderModels func(providerID string) []string
 
 	// ── 插件/Star 管理（对齐 Python star_manager）──
-	// ListStars 返回全部已安装插件元数据。
-	ListStars func() []map[string]any
+	// GetPluginRegistry 返回全部已安装插件元数据。
+	GetPluginRegistry func() []map[string]any
 	// GetStar 按插件名取元数据。
 	GetStar func(name string) map[string]any
 	// SetPluginEnabled 启用/禁用插件。
@@ -1172,13 +1172,13 @@ func (s *hostServiceServer) GetProviderModels(_ context.Context, req *sdkv1.GetP
 
 // ── 插件/Star 管理 RPC 实现 ────────────────────────────────────────────────
 
-func (s *hostServiceServer) ListStars(_ context.Context, _ *sdkv1.Empty) (*sdkv1.StarsResponse, error) {
+func (s *hostServiceServer) GetPluginRegistry(_ context.Context, _ *sdkv1.Empty) (*sdkv1.StarsResponse, error) {
 	h := getHostHooks()
-	if h.ListStars == nil {
+	if h.GetPluginRegistry == nil {
 		return &sdkv1.StarsResponse{}, nil
 	}
 	resp := &sdkv1.StarsResponse{}
-	for _, st := range h.ListStars() {
+	for _, st := range h.GetPluginRegistry() {
 		out, err := json.Marshal(st)
 		if err != nil {
 			return nil, err
