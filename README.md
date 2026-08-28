@@ -332,3 +332,32 @@ if v, ok := cfg["key"]; ok {
 本地开发：clone 到 `~/astrbot-go-plugin-sdk`，宿主 go.mod 通过 `replace` 指向本地。提交后宿主切换到 GitHub 版本。
 
 协议：`proto/plugin.proto` 是宿主↔插件 gRPC 契约（PluginService + HostService）。Go 生成代码在 `gen/sdkv1/`（`buf generate` 重新生成）。**注意 `proto/plugin.proto` 与 Python SDK 仓库的 `proto/plugin.proto` 必须逐字节一致**（同一契约两端），改动需两边同步。
+
+## 协议与数据路径（P1）
+
+本 SDK 与宿主之间的事件 / 消息链 / 响应链走 **原生 protobuf data plane**（0 次
+Event JSON 编解码）：
+
+```
+Core Event → SDKEvent protobuf（固定字段原生 + repeated Component + metadata_json）
+Event 组件 → repeated Component（Plain/At/Image/Reply/Record/Video/File/Json…）
+响应链   → repeated Component（HandleCommandResponse.chain / HookResponse.chain）
+```
+
+- **`event_json` / `chain_json` RPC 字段已移除**（P1，`reserved` 保留旧 field
+  number 防复用）；无 legacy 回退、无双写。
+- **协议版本协商**：`RegisterRequest`/`RegisterResponse.protocol_version`
+  （`P1ProtocolVersion = 2`，见 `protocol.go`）。Host 与 SDK 版本不一致 →
+  明确失败并提示升级，不做 silent fallback。
+- **动态结构保留 JSON**：`SDKEvent.metadata_json`、`Component.data_json`、
+  hook `payload_json`、工具 `args_json`（属扩展点，非 Message Chain）。
+- **二进制路径**：媒体组件走 `bytes base64_data`（≤inline 阈值内联）或
+  `BinaryPayload → FileReference`（大文件经宿主 Blob store，handle 制，宿主
+  TTL/GC，插件不传任意路径）。
+- `TextToImage`/`HtmlRender` 响应同时填 `image_base64`（旧）与 `image_bytes`
+  （新，优先）——SDK `TextToImageBytes`/`HtmlRenderBytes` 直接取字节，免 base64。
+- **Client 事件方法接收 `*sdkv1.SDKEvent`**（Host 用 `CoreEventToSDKEvent`
+  直接构造原生事件，不再经 SDK struct + JSON）。
+
+**版本纪律**：行为不兼容的变更（删除字段、字段语义变化）必须 bump
+`P1ProtocolVersion` 与 SDK tag；新增字段/RPC 不需要。
