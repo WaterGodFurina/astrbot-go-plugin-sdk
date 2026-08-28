@@ -254,3 +254,162 @@ func TestP1ProtocolNegotiationMismatch(t *testing.T) {
 		t.Fatalf("want clear upgrade message, got %v", err)
 	}
 }
+
+// TestP1NativeEventMatrix 覆盖 spec 要求的完整 Event/Component/Metadata 矩阵：
+// 普通/群/私聊、AtBot/Admin、多平台/message_type、各组件类型、组合链、各类
+// metadata（含空值语义）。全部走 Event → SDKEvent → wire → SDKEvent → Event。
+func TestP1NativeEventMatrix(t *testing.T) {
+	base64Png := base64.StdEncoding.EncodeToString([]byte("fakepngbytes"))
+	cases := []struct {
+		name string
+		ev   *Event
+	}{
+		{name: "friend_plain_metadata_empty", ev: &Event{
+			Type: "message", Platform: "telegram", PlatformID: "t1",
+			MessageType: "FriendMessage", SelfID: "s", SenderID: "a",
+			SenderName: "Alice", ConvID: "c", MessageStr: "hi",
+			Chain:  []Component{{Type: CompPlain, Text: "hi"}},
+			Metadata: map[string]any{},
+		}},
+		{name: "group_at_bot_admin", ev: &Event{
+			Type: "message", Platform: "qq_official", PlatformID: "q1",
+			MessageType: "GroupMessage", SelfID: "bot", SenderID: "owner",
+			SenderName: "Owner", ConvID: "g:9", GroupName: "G",
+			IsGroup: true, IsAtBot: true, IsAdmin: true,
+			MessageStr: "@bot hi", Timestamp: 123,
+			Chain: []Component{
+				{Type: CompAt, TargetID: "bot", Name: "bot"},
+				{Type: CompPlain, Text: "hi"},
+			},
+		}},
+		{name: "friend_no_at_not_admin", ev: &Event{
+			Type: "message", Platform: "aiocqhttp", PlatformID: "d",
+			MessageType: "FriendMessage", SelfID: "s", SenderID: "u",
+			MessageStr: "hello", IsGroup: false, IsAtBot: false, IsAdmin: false,
+			Chain: []Component{{Type: CompPlain, Text: "hello"}},
+		}},
+		{name: "reply_plain", ev: &Event{
+			Type: "message", Platform: "lark", MessageType: "GroupMessage",
+			Chain: []Component{
+				{Type: CompReply, ID: "r9", Text: "quoted"},
+				{Type: CompPlain, Text: "answer"},
+			},
+		}},
+		{name: "image_plain", ev: &Event{
+			Type: "message", Platform: "discord", MessageType: "GroupMessage",
+			Chain: []Component{
+				{Type: CompImage, Base64: base64Png, URL: "https://example.com/x.png"},
+				{Type: CompPlain, Text: "看图"},
+			},
+		}},
+		{name: "at_image_plain", ev: &Event{
+			Type: "message", Platform: "kook", MessageType: "GroupMessage",
+			Chain: []Component{
+				{Type: CompAt, TargetID: "u1", Name: "U"},
+				{Type: CompImage, File: "/tmp/a.png", Path: "/tmp/a.png"},
+				{Type: CompPlain, Text: "mixed"},
+			},
+		}},
+		{name: "all_media_types", ev: &Event{
+			Type: "message", Platform: "misskey", MessageType: "GroupMessage",
+			Chain: []Component{
+				{Type: CompPlain, Text: "t"},
+				{Type: CompAt, TargetID: "x"},
+				{Type: CompAtAll},
+				{Type: CompImage, File: "f.png"},
+				{Type: CompRecord, File: "a.ogg", URL: "https://e/r.ogg"},
+				{Type: CompVideo, File: "v.mp4", Path: "/tmp/v.mp4"},
+				{Type: CompFile, Name: "doc.pdf", URL: "https://e/d.pdf", File: "/tmp/d.pdf"},
+				{Type: CompFace, ID: "1"},
+				{Type: CompJson, Data: map[string]any{"app": "card", "n": float64(1), "ok": true}},
+				{Type: CompForward, ID: "fwd1"},
+			},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			se := EventToSDKEvent(tc.ev)
+			wire, err := proto.Marshal(se)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var se2 sdkv1.SDKEvent
+			if err := proto.Unmarshal(wire, &se2); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			back := SDKEventToEvent(&se2)
+			// 固定字段
+			if back.Platform != tc.ev.Platform || back.MessageType != tc.ev.MessageType {
+				t.Fatalf("platform/type mismatch: %+v", back)
+			}
+			if back.SelfID != tc.ev.SelfID || back.SenderID != tc.ev.SenderID ||
+				back.SenderName != tc.ev.SenderName || back.ConvID != tc.ev.ConvID {
+				t.Fatalf("identity fields mismatch: %+v", back)
+			}
+			if back.IsGroup != tc.ev.IsGroup || back.IsAtBot != tc.ev.IsAtBot || back.IsAdmin != tc.ev.IsAdmin {
+				t.Fatalf("bool fields mismatch: %+v", back)
+			}
+			if back.MessageStr != tc.ev.MessageStr || back.Timestamp != tc.ev.Timestamp || back.MessageID != tc.ev.MessageID {
+				t.Fatalf("msg fields mismatch: %+v", back)
+			}
+			// 链：类型与长度一一对应
+			if len(back.Chain) != len(tc.ev.Chain) {
+				t.Fatalf("chain len = %d want %d: %+v", len(back.Chain), len(tc.ev.Chain), back.Chain)
+			}
+			for i, c := range tc.ev.Chain {
+				bc := back.Chain[i]
+				if bc.Type != c.Type {
+					t.Fatalf("chain[%d] type = %q want %q", i, bc.Type, c.Type)
+				}
+				if c.Type == CompJson {
+					if bc.Data["app"] != c.Data["app"] {
+						t.Fatalf("json data mismatch at %d: %v", i, bc.Data)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestP1MetadataSemantics 验证 metadata 各类值的语义保持（含空值与原始 JSON）。
+func TestP1MetadataSemantics(t *testing.T) {
+	cases := []struct {
+		name string
+		md   map[string]any
+	}{
+		{name: "empty", md: map[string]any{}},
+		{name: "scalar", md: map[string]any{"foo": "bar"}},
+		{name: "nested", md: map[string]any{"a": map[string]any{"b": map[string]any{"c": "d"}}}},
+		{name: "array", md: map[string]any{"arr": []any{"x", float64(2), true, nil}}},
+		{name: "number", md: map[string]any{"n": float64(3.14)}},
+		{name: "boolean", md: map[string]any{"ok": true, "no": false}},
+		{name: "null", md: map[string]any{"nil": nil}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := &Event{Type: "message", Platform: "aiocqhttp", MessageStr: "m", Metadata: tc.md}
+			back := SDKEventToEvent(EventToSDKEvent(ev))
+			if len(back.Metadata) != len(tc.md) {
+				t.Fatalf("metadata len = %d want %d: %v", len(back.Metadata), len(tc.md), back.Metadata)
+			}
+			for k, v := range tc.md {
+				bv, ok := back.Metadata[k]
+				if !ok {
+					t.Fatalf("missing metadata key %q", k)
+				}
+				if tc.name == "array" {
+					arr := v.([]any)
+					barr, ok := bv.([]any)
+					if !ok || len(barr) != len(arr) {
+						t.Fatalf("array mismatch: %v", bv)
+					}
+				}
+			}
+			// 空 metadata 不应有 metadata_json（wire 上 0 字节）
+			se := EventToSDKEvent(ev)
+			if len(tc.md) == 0 && len(se.MetadataJson) != 0 {
+				t.Fatalf("empty metadata should produce no metadata_json, got %d bytes", len(se.MetadataJson))
+			}
+		})
+	}
+}

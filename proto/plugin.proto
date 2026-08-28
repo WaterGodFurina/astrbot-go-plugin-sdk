@@ -7,9 +7,10 @@
 //
 //	buf generate
 //
-// The heavy, platform-specific event/component payloads (message chains,
-// metadata) cross the wire as `bytes` of JSON to keep the proto surface small
-// and forward-compatible; the SDK (event.go) provides typed helpers.
+// The event/component payloads cross the wire as native protobuf (P1 data
+// plane): SDKEvent uses fixed native fields, message chains use `repeated
+// Component`, and only metadata (and component-internal dynamic payloads) use
+// JSON. The SDK (event.go) provides the typed plugin-facing helpers.
 //
 // Bidirectional calls: the HOST serves HostService over the go-plugin gRPC
 // broker (fixed AppID 9000). Plugins dial it lazily via the broker to call
