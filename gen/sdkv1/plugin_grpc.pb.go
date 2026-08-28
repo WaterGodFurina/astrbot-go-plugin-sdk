@@ -760,6 +760,10 @@ const (
 	HostService_UnregisterSessionWait_FullMethodName       = "/astrbot.sdk.v1.HostService/UnregisterSessionWait"
 	HostService_RegisterBridgeHook_FullMethodName          = "/astrbot.sdk.v1.HostService/RegisterBridgeHook"
 	HostService_UnregisterBridgeHook_FullMethodName        = "/astrbot.sdk.v1.HostService/UnregisterBridgeHook"
+	HostService_CreateBlob_FullMethodName                  = "/astrbot.sdk.v1.HostService/CreateBlob"
+	HostService_ReadBlob_FullMethodName                    = "/astrbot.sdk.v1.HostService/ReadBlob"
+	HostService_GetBlobInfo_FullMethodName                 = "/astrbot.sdk.v1.HostService/GetBlobInfo"
+	HostService_ReleaseBlob_FullMethodName                 = "/astrbot.sdk.v1.HostService/ReleaseBlob"
 )
 
 // HostServiceClient is the client API for HostService service.
@@ -850,6 +854,15 @@ type HostServiceClient interface {
 	// ── 桥接钩子（botpy/telegram 等兼容层）──
 	RegisterBridgeHook(ctx context.Context, in *BridgeHookRequest, opts ...grpc.CallOption) (*Empty, error)
 	UnregisterBridgeHook(ctx context.Context, in *BridgeHookRequest, opts ...grpc.CallOption) (*Empty, error)
+	// ── 大文件 Blob 存储（P0-2）──────────────────────────────
+	// 插件把大于 inline 阈值（1MB）的二进制交给宿主持久化，拿到一个受控
+	// handle；后续经 ReadBlob 分块读取。宿主统一管理生命周期（TTL/GC），
+	// 插件只传 handle，绝不传任意文件路径（防路径穿越）。
+	CreateBlob(ctx context.Context, in *CreateBlobRequest, opts ...grpc.CallOption) (*CreateBlobResponse, error)
+	// ReadBlob 按 offset/limit 分块读，避免单次大缓冲。
+	ReadBlob(ctx context.Context, in *ReadBlobRequest, opts ...grpc.CallOption) (*ReadBlobResponse, error)
+	GetBlobInfo(ctx context.Context, in *GetBlobInfoRequest, opts ...grpc.CallOption) (*GetBlobInfoResponse, error)
+	ReleaseBlob(ctx context.Context, in *ReleaseBlobRequest, opts ...grpc.CallOption) (*Empty, error)
 }
 
 type hostServiceClient struct {
@@ -1220,6 +1233,46 @@ func (c *hostServiceClient) UnregisterBridgeHook(ctx context.Context, in *Bridge
 	return out, nil
 }
 
+func (c *hostServiceClient) CreateBlob(ctx context.Context, in *CreateBlobRequest, opts ...grpc.CallOption) (*CreateBlobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateBlobResponse)
+	err := c.cc.Invoke(ctx, HostService_CreateBlob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) ReadBlob(ctx context.Context, in *ReadBlobRequest, opts ...grpc.CallOption) (*ReadBlobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadBlobResponse)
+	err := c.cc.Invoke(ctx, HostService_ReadBlob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) GetBlobInfo(ctx context.Context, in *GetBlobInfoRequest, opts ...grpc.CallOption) (*GetBlobInfoResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetBlobInfoResponse)
+	err := c.cc.Invoke(ctx, HostService_GetBlobInfo_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) ReleaseBlob(ctx context.Context, in *ReleaseBlobRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_ReleaseBlob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // HostServiceServer is the server API for HostService service.
 // All implementations must embed UnimplementedHostServiceServer
 // for forward compatibility.
@@ -1308,6 +1361,15 @@ type HostServiceServer interface {
 	// ── 桥接钩子（botpy/telegram 等兼容层）──
 	RegisterBridgeHook(context.Context, *BridgeHookRequest) (*Empty, error)
 	UnregisterBridgeHook(context.Context, *BridgeHookRequest) (*Empty, error)
+	// ── 大文件 Blob 存储（P0-2）──────────────────────────────
+	// 插件把大于 inline 阈值（1MB）的二进制交给宿主持久化，拿到一个受控
+	// handle；后续经 ReadBlob 分块读取。宿主统一管理生命周期（TTL/GC），
+	// 插件只传 handle，绝不传任意文件路径（防路径穿越）。
+	CreateBlob(context.Context, *CreateBlobRequest) (*CreateBlobResponse, error)
+	// ReadBlob 按 offset/limit 分块读，避免单次大缓冲。
+	ReadBlob(context.Context, *ReadBlobRequest) (*ReadBlobResponse, error)
+	GetBlobInfo(context.Context, *GetBlobInfoRequest) (*GetBlobInfoResponse, error)
+	ReleaseBlob(context.Context, *ReleaseBlobRequest) (*Empty, error)
 	mustEmbedUnimplementedHostServiceServer()
 }
 
@@ -1425,6 +1487,18 @@ func (UnimplementedHostServiceServer) RegisterBridgeHook(context.Context, *Bridg
 }
 func (UnimplementedHostServiceServer) UnregisterBridgeHook(context.Context, *BridgeHookRequest) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method UnregisterBridgeHook not implemented")
+}
+func (UnimplementedHostServiceServer) CreateBlob(context.Context, *CreateBlobRequest) (*CreateBlobResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateBlob not implemented")
+}
+func (UnimplementedHostServiceServer) ReadBlob(context.Context, *ReadBlobRequest) (*ReadBlobResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReadBlob not implemented")
+}
+func (UnimplementedHostServiceServer) GetBlobInfo(context.Context, *GetBlobInfoRequest) (*GetBlobInfoResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetBlobInfo not implemented")
+}
+func (UnimplementedHostServiceServer) ReleaseBlob(context.Context, *ReleaseBlobRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReleaseBlob not implemented")
 }
 func (UnimplementedHostServiceServer) mustEmbedUnimplementedHostServiceServer() {}
 func (UnimplementedHostServiceServer) testEmbeddedByValue()                     {}
@@ -2095,6 +2169,78 @@ func _HostService_UnregisterBridgeHook_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HostService_CreateBlob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateBlobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).CreateBlob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_CreateBlob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).CreateBlob(ctx, req.(*CreateBlobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_ReadBlob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadBlobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).ReadBlob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_ReadBlob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).ReadBlob(ctx, req.(*ReadBlobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_GetBlobInfo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetBlobInfoRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).GetBlobInfo(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_GetBlobInfo_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).GetBlobInfo(ctx, req.(*GetBlobInfoRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_ReleaseBlob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReleaseBlobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).ReleaseBlob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_ReleaseBlob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).ReleaseBlob(ctx, req.(*ReleaseBlobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // HostService_ServiceDesc is the grpc.ServiceDesc for HostService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2245,6 +2391,22 @@ var HostService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UnregisterBridgeHook",
 			Handler:    _HostService_UnregisterBridgeHook_Handler,
+		},
+		{
+			MethodName: "CreateBlob",
+			Handler:    _HostService_CreateBlob_Handler,
+		},
+		{
+			MethodName: "ReadBlob",
+			Handler:    _HostService_ReadBlob_Handler,
+		},
+		{
+			MethodName: "GetBlobInfo",
+			Handler:    _HostService_GetBlobInfo_Handler,
+		},
+		{
+			MethodName: "ReleaseBlob",
+			Handler:    _HostService_ReleaseBlob_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

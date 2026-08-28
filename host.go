@@ -2,7 +2,9 @@ package sdk
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"sync"
@@ -187,16 +189,31 @@ func (h *host) SendMessage(platform, sessionID string, chain []Component) error 
 	if err != nil {
 		return err
 	}
-	chainJSON, err := json.Marshal(chain)
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	_, err = svc.SendMessage(ctx, &sdkv1.SendMessageRequest{
+		Platform:        platform,
+		SessionId:       sessionID,
+		ChainComponents: componentsToProto(chain),
+	})
+	return err
+}
+
+// SendMessageComponents 发送原生 proto 组件链（P0-2）。组件可携带
+// BinaryPayload（≤inline 阈值内联 bytes；>阈值 FileReference handle），
+// 大文件经宿主 blob 读取组装，避免全量 base64 塞进 chain_json。
+// 新 API（原生组件）。
+func (h *host) SendMessageComponents(platform, sessionID string, comps []*sdkv1.Component) error {
+	svc, err := hostServiceClient()
 	if err != nil {
 		return err
 	}
 	ctx, cancel := hostRPCCtx()
 	defer cancel()
 	_, err = svc.SendMessage(ctx, &sdkv1.SendMessageRequest{
-		Platform:  platform,
-		SessionId: sessionID,
-		ChainJson: chainJSON,
+		Platform:        platform,
+		SessionId:       sessionID,
+		ChainComponents: comps,
 	})
 	return err
 }
@@ -310,9 +327,22 @@ func (h *host) React(platform, sessionID, messageID, emoji string) error {
 // TextToImage renders text into an image via the host t2i engine, returning
 // base64-encoded PNG bytes.
 func (h *host) TextToImage(text, templateName string) (string, error) {
-	svc, err := hostServiceClient()
+	raw, err := h.TextToImageBytes(text, templateName)
 	if err != nil {
 		return "", err
+	}
+	if len(raw) == 0 {
+		return "", nil
+	}
+	return base64.StdEncoding.EncodeToString(raw), nil
+}
+
+// TextToImageBytes 返回宿主 t2i 渲染的 PNG 原始字节（P0-1：优先读 RPC 的
+// image_bytes，旧宿主只填 image_base64 时回退 base64 解码）。
+func (h *host) TextToImageBytes(text, templateName string) ([]byte, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return nil, err
 	}
 	ctx, cancel := hostLLMRPCCtx()
 	defer cancel()
@@ -321,17 +351,33 @@ func (h *host) TextToImage(text, templateName string) (string, error) {
 		TemplateName: templateName,
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return resp.ImageBase64, nil
+	if len(resp.ImageBytes) > 0 {
+		return resp.ImageBytes, nil
+	}
+	return base64.StdEncoding.DecodeString(resp.ImageBase64)
 }
 
 // HtmlRender renders an HTML template + data into an image via the host
 // (t2i remote preferred, local gg fallback), returning base64-encoded PNG bytes.
 func (h *host) HtmlRender(template, data, options string) (string, error) {
-	svc, err := hostServiceClient()
+	raw, err := h.HtmlRenderBytes(template, data, options)
 	if err != nil {
 		return "", err
+	}
+	if len(raw) == 0 {
+		return "", nil
+	}
+	return base64.StdEncoding.EncodeToString(raw), nil
+}
+
+// HtmlRenderBytes 返回宿主 HtmlRender 渲染的 PNG 原始字节（P0-1：优先读
+// image_bytes，旧宿主只填 image_base64 时回退 base64 解码）。
+func (h *host) HtmlRenderBytes(template, data, options string) ([]byte, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return nil, err
 	}
 	ctx, cancel := hostLLMRPCCtx()
 	defer cancel()
@@ -341,9 +387,12 @@ func (h *host) HtmlRender(template, data, options string) (string, error) {
 		Options:  options,
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return resp.ImageBase64, nil
+	if len(resp.ImageBytes) > 0 {
+		return resp.ImageBytes, nil
+	}
+	return base64.StdEncoding.DecodeString(resp.ImageBase64)
 }
 
 // RegisterBridgeHook 告知宿主：本插件经"桥接钩子"接收入站消息（botpy/
@@ -369,6 +418,75 @@ func (h *host) UnregisterBridgeHook(hookName string) error {
 	ctx, cancel := hostRPCCtx()
 	defer cancel()
 	_, err = svc.UnregisterBridgeHook(ctx, &sdkv1.BridgeHookRequest{HookName: hookName})
+	return err
+}
+
+// CreateBlob 把 data 交给宿主持久化，返回受控 FileReference handle（P0-2）。
+// 大文件（>inline 阈值）由插件侧决定走此路径；宿主统一 TTL/GC。
+func (h *host) CreateBlob(data []byte, mimeType, filename string, ttlSeconds int32) (*sdkv1.FileReference, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := hostLLMRPCCtx()
+	defer cancel()
+	resp, err := svc.CreateBlob(ctx, &sdkv1.CreateBlobRequest{
+		Data:       data,
+		MimeType:   mimeType,
+		Filename:   filename,
+		TtlSeconds: ttlSeconds,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if resp.File == nil {
+		return nil, fmt.Errorf("host returned empty blob reference")
+	}
+	return resp.File, nil
+}
+
+// ReadBlob 分块读取宿主 blob（offset/limit；limit<=0 用宿主默认块）。
+func (h *host) ReadBlob(handleID string, offset int64, limit int32) ([]byte, bool, int64, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return nil, false, 0, err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.ReadBlob(ctx, &sdkv1.ReadBlobRequest{HandleId: handleID, Offset: offset, Limit: limit})
+	if err != nil {
+		return nil, false, 0, err
+	}
+	return resp.Data, resp.Eof, resp.TotalSize, nil
+}
+
+// GetBlobInfo 返回 blob 元数据。
+func (h *host) GetBlobInfo(handleID string) (*sdkv1.FileReference, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.GetBlobInfo(ctx, &sdkv1.GetBlobInfoRequest{HandleId: handleID})
+	if err != nil {
+		return nil, err
+	}
+	if resp.File == nil {
+		return nil, fmt.Errorf("blob not found: %s", handleID)
+	}
+	return resp.File, nil
+}
+
+// ReleaseBlob 主动释放宿主 blob（最终删除由宿主 TTL/GC 判定）。
+func (h *host) ReleaseBlob(handleID string) error {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	_, err = svc.ReleaseBlob(ctx, &sdkv1.ReleaseBlobRequest{HandleId: handleID})
 	return err
 }
 
@@ -473,6 +591,17 @@ type HostServiceHooks struct {
 	RegisterBridgeHook func(pluginName, hookName string) error
 	// UnregisterBridgeHook 注销桥接钩子。
 	UnregisterBridgeHook func(pluginName, hookName string) error
+
+	// ── 大文件 Blob 存储（P0-2）──
+	// CreateBlob 持久化 data 并返回受控 handle（宿主统一 TTL/GC，插件不传
+	// 任意文件路径）。
+	CreateBlob func(data []byte, mimeType, filename string, ttlSeconds int32) (*sdkv1.FileReference, error)
+	// ReadBlob 按 offset/limit 分块读。
+	ReadBlob func(handleID string, offset int64, limit int32) ([]byte, bool, int64, error)
+	// GetBlobInfo 返回 blob 元数据。
+	GetBlobInfo func(handleID string) (*sdkv1.FileReference, error)
+	// ReleaseBlob 主动标记删除（最终删除仍由宿主 TTL/GC 判定）。
+	ReleaseBlob func(handleID string) error
 }
 
 var (
@@ -717,17 +846,83 @@ func (s *hostServiceServer) SendMessage(_ context.Context, req *sdkv1.SendMessag
 	if h.SendMessage == nil {
 		return &sdkv1.Empty{}, nil
 	}
-	var chain []Component
-	if len(req.ChainJson) > 0 {
-		if err := json.Unmarshal(req.ChainJson, &chain); err != nil {
-			warnJSON("SendMessage chain_json", err)
-			return nil, status.Errorf(codes.InvalidArgument, "chain_json decode failed: %v", err)
+	// 原生组件链（可携带 BinaryPayload 大文件）。
+	chain := make([]Component, 0, len(req.ChainComponents))
+	for _, c := range req.ChainComponents {
+		comp, err := protoComponentToSDK(c)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "chain component decode failed: %v", err)
 		}
+		chain = append(chain, comp)
 	}
 	if err := h.SendMessage(req.Platform, req.SessionId, chain); err != nil {
 		return nil, err
 	}
 	return &sdkv1.Empty{}, nil
+}
+
+// protoComponentToSDK 把 proto Component（含 BinaryPayload）转成 SDK 扁平
+// Component。媒体二进制解析策略：
+//   - payload.inline_data → Base64 字段（直接可发）
+//   - payload.file → 经宿主 blob store 读回（ReadBlob 分块）→ Base64 字段
+//   - base64_data 字段 → Base64 字段
+func protoComponentToSDK(c *sdkv1.Component) (Component, error) {
+	out := Component{
+		Type:     ComponentType(c.Type),
+		Text:     c.Text,
+		TargetID: c.TargetId,
+		Name:     c.Name,
+		URL:      c.Url,
+		Path:     c.Path,
+		File:     c.File,
+		FileID:   c.FileId,
+		ID:       c.Id,
+	}
+	if len(c.Base64Data) > 0 {
+		out.Base64 = string(c.Base64Data)
+	}
+	if c.Payload != nil {
+		switch p := c.Payload.Payload.(type) {
+		case *sdkv1.BinaryPayload_InlineData:
+			out.Base64 = base64.StdEncoding.EncodeToString(p.InlineData)
+			out.File = ""
+		case *sdkv1.BinaryPayload_File:
+			b, err := readBlobAll(p.File.HandleId)
+			if err != nil {
+				return out, fmt.Errorf("read blob %s: %w", p.File.HandleId, err)
+			}
+			out.Base64 = base64.StdEncoding.EncodeToString(b)
+			out.File = ""
+		}
+	}
+	if c.DataJson != nil && len(c.DataJson) > 0 {
+		var m map[string]any
+		if err := json.Unmarshal(c.DataJson, &m); err == nil {
+			out.Data = m
+		}
+	}
+	return out, nil
+}
+
+// readBlobAll 经宿主 ReadBlob hook 分块读回整个 blob。
+func readBlobAll(handleID string) ([]byte, error) {
+	h := getHostHooks()
+	if h.ReadBlob == nil {
+		return nil, fmt.Errorf("host ReadBlob not configured")
+	}
+	var out []byte
+	var offset int64
+	for {
+		chunk, eof, _, err := h.ReadBlob(handleID, offset, 0)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, chunk...)
+		offset += int64(len(chunk))
+		if eof {
+			return out, nil
+		}
+	}
 }
 
 func (s *hostServiceServer) RecallMessage(_ context.Context, req *sdkv1.RecallMessageRequest) (*sdkv1.Empty, error) {
@@ -912,7 +1107,7 @@ func (s *hostServiceServer) TextToImage(_ context.Context, req *sdkv1.TextToImag
 	if err != nil {
 		return nil, err
 	}
-	return &sdkv1.TextToImageResponse{ImageBase64: b64}, nil
+	return dualImageResponse(b64), nil
 }
 
 // HtmlRender renders an HTML template + data into an image via the host.
@@ -925,7 +1120,21 @@ func (s *hostServiceServer) HtmlRender(_ context.Context, req *sdkv1.HtmlRenderR
 	if err != nil {
 		return nil, err
 	}
-	return &sdkv1.HtmlRenderResponse{ImageBase64: b64}, nil
+	return dualHtmlResponse(b64), nil
+}
+
+// dualImageResponse 双写 image 响应：保留 base64 string（旧 SDK 依赖）并解码
+// 出原始 bytes 填 image_bytes（新 SDK 免一次 base64 往返）。TextToImage 是
+// 低频慢操作，host 侧额外一次 base64 解码可忽略。
+func dualImageResponse(b64 string) *sdkv1.TextToImageResponse {
+	raw, _ := base64.StdEncoding.DecodeString(b64)
+	return &sdkv1.TextToImageResponse{ImageBase64: b64, ImageBytes: raw}
+}
+
+// dualHtmlResponse 同 dualImageResponse，用于 HtmlRender 响应。
+func dualHtmlResponse(b64 string) *sdkv1.HtmlRenderResponse {
+	raw, _ := base64.StdEncoding.DecodeString(b64)
+	return &sdkv1.HtmlRenderResponse{ImageBase64: b64, ImageBytes: raw}
 }
 
 // ── 会话管理 RPC 实现 ──────────────────────────────────────────────────────
@@ -1372,6 +1581,69 @@ func (s *hostServiceServer) UnregisterBridgeHook(_ context.Context, req *sdkv1.B
 		return &sdkv1.Empty{}, nil
 	}
 	if err := h.UnregisterBridgeHook(s.identity(), req.HookName); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
+}
+
+// CreateBlob 把插件的大二进制交由宿主持久化，返回受控 FileReference handle。
+func (s *hostServiceServer) CreateBlob(_ context.Context, req *sdkv1.CreateBlobRequest) (*sdkv1.CreateBlobResponse, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.CreateBlob == nil {
+		return nil, status.Error(codes.Unimplemented, "host blob store not configured")
+	}
+	ref, err := h.CreateBlob(req.Data, req.MimeType, req.Filename, req.TtlSeconds)
+	if err != nil {
+		return nil, err
+	}
+	return &sdkv1.CreateBlobResponse{File: ref}, nil
+}
+
+// ReadBlob 按 offset/limit 分块读宿主 blob。
+func (s *hostServiceServer) ReadBlob(_ context.Context, req *sdkv1.ReadBlobRequest) (*sdkv1.ReadBlobResponse, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.ReadBlob == nil {
+		return nil, status.Error(codes.Unimplemented, "host blob store not configured")
+	}
+	data, eof, total, err := h.ReadBlob(req.HandleId, req.Offset, req.Limit)
+	if err != nil {
+		return nil, err
+	}
+	return &sdkv1.ReadBlobResponse{Data: data, Eof: eof, TotalSize: total}, nil
+}
+
+// GetBlobInfo 返回 blob 元数据。
+func (s *hostServiceServer) GetBlobInfo(_ context.Context, req *sdkv1.GetBlobInfoRequest) (*sdkv1.GetBlobInfoResponse, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.GetBlobInfo == nil {
+		return nil, status.Error(codes.Unimplemented, "host blob store not configured")
+	}
+	ref, err := h.GetBlobInfo(req.HandleId)
+	if err != nil {
+		return nil, err
+	}
+	return &sdkv1.GetBlobInfoResponse{File: ref}, nil
+}
+
+// ReleaseBlob 主动释放 blob（最终删除由宿主 TTL/GC 判定）。
+func (s *hostServiceServer) ReleaseBlob(_ context.Context, req *sdkv1.ReleaseBlobRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.ReleaseBlob == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	if err := h.ReleaseBlob(req.HandleId); err != nil {
 		return nil, err
 	}
 	return &sdkv1.Empty{}, nil

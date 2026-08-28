@@ -39,7 +39,7 @@ var PluginMap = map[string]plugin.Plugin{
 }
 
 // grpcServer is the plugin-side gRPC server factory. It raises the default
-// 4MB message cap so large event_json/chain_json payloads (base64 images,
+// 4MB message cap so large payloads (base64 images,
 // long conversations) can be received/sent.
 func grpcServer(opts []grpc.ServerOption) *grpc.Server {
 	opts = append(opts,
@@ -224,9 +224,17 @@ func marshalSchema(v map[string]any) []byte {
 }
 
 // Register returns the plugin's metadata and handler descriptors.
-func (s *serviceServer) Register(context.Context, *sdkv1.RegisterRequest) (*sdkv1.RegisterResponse, error) {
+func (s *serviceServer) Register(ctx context.Context, req *sdkv1.RegisterRequest) (*sdkv1.RegisterResponse, error) {
+	// P1 协议协商：Host 上报的 protocol_version 必须与 SDK 一致（P1 删除
+	// legacy event_json/chain_json，版本不匹配无法互操作 → 明确失败并提示
+	// 升级，不做 Legacy 回退）。
+	if req.GetProtocolVersion() != P1ProtocolVersion {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"protocol version mismatch: Host=%d SDK(P1)=%d; please upgrade the SDK or Host to the same protocol version",
+			req.GetProtocolVersion(), P1ProtocolVersion)
+	}
 	if s.impl == nil {
-		return &sdkv1.RegisterResponse{}, nil
+		return &sdkv1.RegisterResponse{ProtocolVersion: P1ProtocolVersion}, nil
 	}
 	schema := marshalSchema(s.impl.ConfigSchema)
 	resp := &sdkv1.RegisterResponse{
@@ -235,6 +243,7 @@ func (s *serviceServer) Register(context.Context, *sdkv1.RegisterRequest) (*sdkv
 		Description:      s.impl.Description,
 		Author:           s.impl.Author,
 		ConfigSchemaJson: schema,
+		ProtocolVersion:  P1ProtocolVersion,
 	}
 	for _, c := range s.impl.Commands {
 		resp.Commands = append(resp.Commands, &sdkv1.CommandDesc{
@@ -346,7 +355,7 @@ func (s *serviceServer) HandleCommand(_ context.Context, req *sdkv1.HandleComman
 	if s.impl == nil {
 		return &sdkv1.HandleCommandResponse{}, nil
 	}
-	e, err := eventFromJSONStrict(req.EventJson)
+	e, err := eventFromStrict(req.Event)
 	if err != nil {
 		return nil, err
 	}
@@ -367,11 +376,7 @@ func (s *serviceServer) HandleCommand(_ context.Context, req *sdkv1.HandleComman
 			if err != nil {
 				return nil, err
 			}
-			chainJSON, err := json.Marshal(chain)
-			if err != nil {
-				return nil, err
-			}
-			resp.ChainJson = chainJSON
+			resp.Chain = componentsToProto(chain)
 			return resp, nil
 		}
 		if c.Handler == nil {
@@ -400,7 +405,7 @@ func (s *serviceServer) HandleFilter(_ context.Context, req *sdkv1.HandleFilterR
 	if s.impl == nil {
 		return &sdkv1.HandleFilterResponse{Allow: true}, nil
 	}
-	e := eventFromJSON(req.EventJson)
+	e := SDKEventToEvent(req.Event)
 	for _, f := range s.impl.Filters {
 		if f.Name != req.Name {
 			continue
@@ -456,7 +461,7 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 	if s.impl == nil {
 		return resp, nil
 	}
-	e := eventFromJSON(req.EventJson)
+	e := SDKEventToEvent(req.Event)
 	for _, d := range hookDispatchers {
 		matched, err := d.scan(s, req, e, resp, markHandled)
 		if matched {
@@ -483,7 +488,7 @@ type hookDispatcher struct {
 }
 
 // hookInvoke 封装单个钩子“载荷解码 + 调用 + 结果写回”的差异（审查项二-11）。
-// 仅 result 钩子需要写回（resp.ChainJson / resp.Stop，须在 markHandled 之前完成，
+// 仅 result 钩子需要写回（resp.Chain / resp.Stop，须在 markHandled 之前完成，
 // 这样 EventResult 能读到最终的 Stop）；其余钩子只读 req 并调用自身 Handler。
 // 返回非 nil error 时 HandleHook 以 gRPC 错误返回。
 type hookInvoke[T any] func(req *sdkv1.HandleHookRequest, e *Event, h T, resp *sdkv1.HookResponse) error
@@ -573,22 +578,13 @@ func resultEventOK(h ResultHook) bool {
 // resp（markHandled 在其后执行，EventResult 能读到最终 Stop）——错误处理
 // 路径与原 result 段循环逐行对应。审查项二-11。
 func invokeResultHook(req *sdkv1.HandleHookRequest, e *Event, h ResultHook, resp *sdkv1.HookResponse) error {
-	var chain []Component
-	if len(req.ChainJson) > 0 {
-		if err := json.Unmarshal(req.ChainJson, &chain); err != nil {
-			logService().Warn("invokeResultHook: 入站 chain_json 解码失败，以空链继续", "error", err)
-		}
-	}
+	chain := protoToComponents(req.Chain)
 	var handlerErr error
 	chain, handlerErr = h.Handler(e, chain)
 	if handlerErr != nil {
 		return handlerErr
 	}
-	chainJSON, err := json.Marshal(chain)
-	if err != nil {
-		return err
-	}
-	resp.ChainJson = chainJSON
+	resp.Chain = componentsToProto(chain)
 	resp.Stop = h.Stop
 	return nil
 }
@@ -722,7 +718,7 @@ func (s *serviceServer) HandleLLMRequest(_ context.Context, req *sdkv1.HandleLLM
 	if s.impl == nil {
 		return resp, nil
 	}
-	e := eventFromJSON(req.EventJson)
+	e := SDKEventToEvent(req.Event)
 	for _, h := range s.impl.LLMRequestHooks {
 		if h.Name != req.Name {
 			continue
@@ -798,7 +794,7 @@ func (s *serviceServer) HandleTool(_ context.Context, req *sdkv1.HandleToolReque
 	if s.impl == nil {
 		return resp, nil
 	}
-	e, err := eventFromJSONStrict(req.EventJson)
+	e, err := eventFromStrict(req.Event)
 	if err != nil {
 		return nil, err
 	}
@@ -894,7 +890,7 @@ func (s *serviceServer) FeedSessionWait(_ context.Context, req *sdkv1.FeedSessio
 	if s.impl == nil {
 		return &sdkv1.FeedSessionWaitResponse{Handled: false}, nil
 	}
-	e := eventFromJSON(req.EventJson)
+	e := SDKEventToEvent(req.Event)
 	umo := s.impl.unifiedMsgOriginOf(e)
 	if umo == "" {
 		return &sdkv1.FeedSessionWaitResponse{Handled: false}, nil
@@ -1104,31 +1100,12 @@ func (s *serviceServer) Cleanup(context.Context, *sdkv1.Empty) (*sdkv1.Empty, er
 	return &sdkv1.Empty{}, nil
 }
 
-// eventFromJSON decodes a serialized Event, tolerating empty/invalid payloads.
-// 损坏时返回零值 Event 并照常分发（fail-safe：基于 SenderID/IsAdmin 的插件
-// 会得到空值，不会误用其他用户身份）。
-func eventFromJSON(b []byte) *Event {
-	if len(b) == 0 {
-		return &Event{}
+
+// eventFromStrict 从 proto SDKEvent 还原 Event；nil（协议不匹配/缺事件）直接报错。
+func eventFromStrict(se *sdkv1.SDKEvent) (*Event, error) {
+	if se == nil {
+		return nil, status.Error(codes.InvalidArgument, "event is required (SDKEvent)")
 	}
-	var e Event
-	if err := json.Unmarshal(b, &e); err != nil {
-		logService().Warn("eventFromJSON: invalid event JSON, decoding to zero value", "error", err)
-		return &Event{}
-	}
-	return &e
+	return SDKEventToEvent(se), nil
 }
 
-// eventFromJSONStrict 是 eventFromJSON 的严格变体：损坏/空 payload 直接
-// 返回 InvalidArgument，供命令/工具等"事件必须可信"的入口使用，避免零值
-// Event（SenderID=""、IsAdmin=false）被当作真实事件分发。
-func eventFromJSONStrict(b []byte) (*Event, error) {
-	if len(b) == 0 {
-		return &Event{}, nil
-	}
-	var e Event
-	if err := json.Unmarshal(b, &e); err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "event_json decode failed: %v", err)
-	}
-	return &e, nil
-}

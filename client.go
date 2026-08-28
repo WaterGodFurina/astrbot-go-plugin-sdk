@@ -1,6 +1,8 @@
 package sdk
 
 import (
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,7 +16,7 @@ import (
 )
 
 // maxGRPCMessageSize raises the gRPC message cap above the 4MB default so
-// large event_json/chain_json payloads (base64 images, long conversations)
+// large native payloads (base64 images, long conversations)
 // can cross the wire between host and plugin.
 const maxGRPCMessageSize = 128 << 20 // 128MB
 
@@ -83,7 +85,18 @@ func NewClient(conn *grpc.ClientConn) *Client {
 
 // Register fetches the plugin's metadata and handler descriptors.
 func (c *Client) Register(ctx context.Context) (*sdkv1.RegisterResponse, error) {
-	return c.svc.Register(ctx, &sdkv1.RegisterRequest{}, rpcCallOpts...)
+	resp, err := c.svc.Register(ctx, &sdkv1.RegisterRequest{ProtocolVersion: P1ProtocolVersion}, rpcCallOpts...)
+	if err != nil {
+		return nil, err
+	}
+	// P1 协商：插件（serviceServer.Register）已校验 Host 版本；这里校验插件
+	// 上报的版本，不匹配明确失败。
+	if resp.GetProtocolVersion() != P1ProtocolVersion {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"protocol version mismatch: SDK(plugin)=%d Host(P1)=%d; please upgrade the SDK or Host to the same protocol version",
+			resp.GetProtocolVersion(), P1ProtocolVersion)
+	}
+	return resp, nil
 }
 
 // normalizeResult resolves a plugin's EventResult for the host: new plugin
@@ -107,41 +120,27 @@ func normalizeResult(respResult *sdkv1.EventResult, legacySent, legacyStop, lega
 // optional rich result chain (text + images + files). The *EventResult is
 // never nil: `result.Sent` reports whether the plugin performed a send
 // operation (legacy plugins fall back to the response's `sent` field).
-func (c *Client) HandleCommand(ctx context.Context, name string, args []string, e *Event) (string, []Component, *sdkv1.EventResult, error) {
+func (c *Client) HandleCommand(ctx context.Context, name string, args []string, se *sdkv1.SDKEvent) (string, []Component, *sdkv1.EventResult, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	ev, err := json.Marshal(e)
-	if err != nil {
-		return "", nil, &sdkv1.EventResult{}, err
-	}
 	resp, err := c.svc.HandleCommand(ctx, &sdkv1.HandleCommandRequest{
-		Name:      name,
-		Args:      args,
-		EventJson: ev,
+		Name:  name,
+		Args:  args,
+		Event: se,
 	}, rpcCallOpts...)
 	if err != nil {
 		return "", nil, &sdkv1.EventResult{}, err
 	}
-	var chain []Component
-	if len(resp.ChainJson) > 0 {
-		if err := json.Unmarshal(resp.ChainJson, &chain); err != nil {
-			return "", nil, &sdkv1.EventResult{}, err
-		}
-	}
-	return resp.Text, chain, normalizeResult(resp.Result, resp.Sent, resp.Stop, false), nil
+	return resp.Text, protoToComponents(resp.Chain), normalizeResult(resp.Result, resp.Sent, resp.Stop, false), nil
 }
 
 // HandleFilter invokes a filter handler, returning whether the event may
 // continue. The *EventResult is never nil: `result.Sent` reports whether the
 // plugin sent a message while running the filter (legacy fallback included).
-func (c *Client) HandleFilter(ctx context.Context, name string, e *Event) (bool, *sdkv1.EventResult, error) {
+func (c *Client) HandleFilter(ctx context.Context, name string, se *sdkv1.SDKEvent) (bool, *sdkv1.EventResult, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	ev, err := json.Marshal(e)
-	if err != nil {
-		return true, &sdkv1.EventResult{}, err
-	}
-	resp, err := c.svc.HandleFilter(ctx, &sdkv1.HandleFilterRequest{Name: name, EventJson: ev}, rpcCallOpts...)
+	resp, err := c.svc.HandleFilter(ctx, &sdkv1.HandleFilterRequest{Name: name, Event: se}, rpcCallOpts...)
 	if err != nil {
 		return true, &sdkv1.EventResult{}, err
 	}
@@ -153,49 +152,33 @@ func (c *Client) HandleFilter(ctx context.Context, name string, e *Event) (bool,
 // the (legacy-derived) pipeline-stop flag; the *EventResult is never nil and
 // `result.Sent` reports whether the plugin sent a message while running the
 // hook (legacy fallback included).
-func (c *Client) HandleHook(ctx context.Context, name string, e *Event, chain []Component) ([]Component, bool, *sdkv1.EventResult, error) {
-	return c.handleHook(ctx, name, e, chain, nil)
+func (c *Client) HandleHook(ctx context.Context, name string, se *sdkv1.SDKEvent, chain []Component) ([]Component, bool, *sdkv1.EventResult, error) {
+	return c.handleHook(ctx, name, se, chain, nil)
 }
 
 // HandleHookWithPayload invokes a payload-carrying hook handler (on_llm_response,
 // on_using_llm_tool, on_llm_tool_respond, on_plugin_error, lifecycle hooks).
 // payload is JSON-marshaled into the RPC; pass nil for event-only hooks.
-func (c *Client) HandleHookWithPayload(ctx context.Context, name string, e *Event, chain []Component, payload any) ([]Component, bool, *sdkv1.EventResult, error) {
-	return c.handleHook(ctx, name, e, chain, payload)
+func (c *Client) HandleHookWithPayload(ctx context.Context, name string, se *sdkv1.SDKEvent, chain []Component, payload any) ([]Component, bool, *sdkv1.EventResult, error) {
+	return c.handleHook(ctx, name, se, chain, payload)
 }
 
-func (c *Client) handleHook(ctx context.Context, name string, e *Event, chain []Component, payload any) ([]Component, bool, *sdkv1.EventResult, error) {
+func (c *Client) handleHook(ctx context.Context, name string, se *sdkv1.SDKEvent, chain []Component, payload any) ([]Component, bool, *sdkv1.EventResult, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	ev, err := json.Marshal(e)
-	if err != nil {
-		return chain, false, &sdkv1.EventResult{}, err
-	}
-	var chainJSON []byte
-	if len(chain) > 0 {
-		if chainJSON, err = json.Marshal(chain); err != nil {
-			return chain, false, &sdkv1.EventResult{}, err
-		}
-	}
 	var payloadJSON []byte
 	if payload != nil {
+		var err error
 		if payloadJSON, err = json.Marshal(payload); err != nil {
 			return chain, false, &sdkv1.EventResult{}, err
 		}
 	}
-	resp, err := c.svc.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: name, EventJson: ev, ChainJson: chainJSON, PayloadJson: payloadJSON}, rpcCallOpts...)
+	resp, err := c.svc.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: name, Event: se, Chain: componentsToProto(chain), PayloadJson: payloadJSON}, rpcCallOpts...)
 	if err != nil {
 		return chain, false, &sdkv1.EventResult{}, err
 	}
-	if len(resp.ChainJson) > 0 {
-		var out []Component
-		if err := json.Unmarshal(resp.ChainJson, &out); err == nil {
-			chain = out
-		} else {
-			// 解码失败时降级为原始 chain，但不再静默：打 warning 便于定位
-			// 插件侧输出损坏 chain_json 的钩子。
-			logWarnf("HandleHook(%q): 插件返回的 chain_json 解码失败，保留原始结果链: %v", name, err)
-		}
+	if len(resp.Chain) > 0 {
+		chain = protoToComponents(resp.Chain)
 	}
 	res := normalizeResult(resp.Result, resp.Sent, resp.Stop, resp.Handled)
 	return chain, res.StopPropagation, res, nil
@@ -205,16 +188,12 @@ func (c *Client) handleHook(ctx context.Context, name string, e *Event, chain []
 // modified) system prompt, the (possibly modified) user prompt, the stop
 // flag, and the EventResult (never nil; `result.Sent` reports plugin sends,
 // with legacy fallback).
-func (c *Client) HandleLLMRequest(ctx context.Context, name string, e *Event, systemPrompt, userPrompt string) (system, user string, stop bool, res *sdkv1.EventResult, err error) {
+func (c *Client) HandleLLMRequest(ctx context.Context, name string, se *sdkv1.SDKEvent, systemPrompt, userPrompt string) (system, user string, stop bool, res *sdkv1.EventResult, err error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	ev, err := json.Marshal(e)
-	if err != nil {
-		return systemPrompt, userPrompt, false, &sdkv1.EventResult{}, err
-	}
 	resp, err := c.svc.HandleLLMRequest(ctx, &sdkv1.HandleLLMRequestRequest{
 		Name:         name,
-		EventJson:    ev,
+		Event:        se,
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
 	}, rpcCallOpts...)
@@ -259,21 +238,17 @@ func (c *Client) GetConfigSchema(ctx context.Context) ([]byte, error) {
 // HandleTool invokes a registered LLM function tool. The *EventResult is never
 // nil: `result.Sent` reports whether the plugin sent a message while running
 // the tool (legacy fallback included).
-func (c *Client) HandleTool(ctx context.Context, name string, args map[string]any, e *Event) (string, bool, *sdkv1.EventResult, error) {
+func (c *Client) HandleTool(ctx context.Context, name string, args map[string]any, se *sdkv1.SDKEvent) (string, bool, *sdkv1.EventResult, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	ev, err := json.Marshal(e)
-	if err != nil {
-		return "", false, &sdkv1.EventResult{}, err
-	}
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
 		return "", false, &sdkv1.EventResult{}, err
 	}
 	resp, err := c.svc.HandleTool(ctx, &sdkv1.HandleToolRequest{
-		Name:      name,
-		ArgsJson:  argsJSON,
-		EventJson: ev,
+		Name:     name,
+		ArgsJson: argsJSON,
+		Event:    se,
 	}, rpcCallOpts...)
 	if err != nil {
 		return "", false, &sdkv1.EventResult{}, err
@@ -314,10 +289,10 @@ func (c *Client) SetLogLevel(ctx context.Context, level string) error {
 // session wait (session_waiter) can consume it. Returns handled=true when a
 // wait consumed the event. Old plugin binaries return UNIMPLEMENTED; the
 // caller should treat that as handled=false (no wait registered).
-func (c *Client) FeedSessionWait(ctx context.Context, eventJSON []byte) (bool, error) {
+func (c *Client) FeedSessionWait(ctx context.Context, se *sdkv1.SDKEvent) (bool, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	resp, err := c.svc.FeedSessionWait(ctx, &sdkv1.FeedSessionWaitRequest{EventJson: eventJSON}, rpcCallOpts...)
+	resp, err := c.svc.FeedSessionWait(ctx, &sdkv1.FeedSessionWaitRequest{Event: se}, rpcCallOpts...)
 	if err != nil {
 		return false, err
 	}

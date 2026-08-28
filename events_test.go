@@ -2,11 +2,16 @@ package sdk
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 
 	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // TestRegisterEmitsTypedHookEvents 验证 Register 为所有类型化钩子输出正确的
@@ -29,7 +34,7 @@ func TestRegisterEmitsTypedHookEvents(t *testing.T) {
 		AgentDoneHooks:         []AgentDoneHook{{Name: "ad", Handler: func(e *Event, r *LLMResponse) error { return nil }}},
 	}
 	s := &serviceServer{impl: p}
-	resp, err := s.Register(context.Background(), &sdkv1.RegisterRequest{})
+	resp, err := s.Register(context.Background(), &sdkv1.RegisterRequest{ProtocolVersion: P1ProtocolVersion})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -153,8 +158,8 @@ func TestHandleHookResultAndMessageHooks(t *testing.T) {
 	s := &serviceServer{impl: p}
 
 	resp, err := s.HandleHook(context.Background(), &sdkv1.HandleHookRequest{
-		Name:      "decorate",
-		ChainJson: mustJSON([]Component{Text("hi")}),
+		Name:  "decorate",
+		Chain: componentsToProto([]Component{Text("hi")}),
 	})
 	if err != nil {
 		t.Fatalf("decorate: err=%v", err)
@@ -162,10 +167,7 @@ func TestHandleHookResultAndMessageHooks(t *testing.T) {
 	if !resp.Handled {
 		t.Fatalf("decorate: want handled")
 	}
-	var chain []Component
-	if err := json.Unmarshal(resp.ChainJson, &chain); err != nil {
-		t.Fatalf("decorate chain: %v", err)
-	}
+	chain := protoToComponents(resp.Chain)
 	if len(chain) != 2 || chain[1].Text != "[x]" {
 		t.Fatalf("decorate: want decorated chain, got %+v", chain)
 	}
@@ -183,4 +185,72 @@ func mustJSON(v any) []byte {
 		panic(err)
 	}
 	return b
+}
+
+// TestP1NativeEventRoundTrip 验证 P1 native Event 数据面：Event → SDKEvent
+// → proto wire → SDKEvent → Event 完整往返（固定字段 / 多类型组件 / metadata）。
+func TestP1NativeEventRoundTrip(t *testing.T) {
+	ev := &Event{
+		Type: "message", Platform: "aiocqhttp", PlatformID: "default",
+		MessageType: "GroupMessage", SelfID: "2408045264", SenderID: "u1",
+		SenderName: "tester", ConvID: "g:1", GroupName: "g",
+		IsGroup: true, IsAtBot: true, IsAdmin: false,
+		MessageStr: "hi", PlainText: "hi", RawMessage: `{"x":1}`,
+		MessageID: "m1", Timestamp: 1700000000,
+		Metadata: map[string]any{"foo": "bar", "n": float64(3), "nested": map[string]any{"a": true}},
+		Chain: []Component{
+			{Type: CompAt, TargetID: "2408045264", Name: "bot"},
+			{Type: CompPlain, Text: "hello"},
+			{Type: CompImage, Base64: base64.StdEncoding.EncodeToString([]byte("imgdata"))},
+			{Type: CompJson, Data: map[string]any{"app": "test"}},
+			{Type: CompReply, ID: "r1", Text: "quoted"},
+		},
+	}
+	se := EventToSDKEvent(ev)
+	wire, err := proto.Marshal(se)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var se2 sdkv1.SDKEvent
+	if err := proto.Unmarshal(wire, &se2); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	back := SDKEventToEvent(&se2)
+	if back.SenderID != "u1" || back.MessageID != "m1" || !back.IsGroup || !back.IsAtBot {
+		t.Fatalf("fixed fields mismatch: %+v", back)
+	}
+	if back.Timestamp != 1700000000 {
+		t.Fatalf("timestamp mismatch")
+	}
+	if back.Metadata["foo"] != "bar" || back.Metadata["nested"].(map[string]any)["a"] != true {
+		t.Fatalf("metadata mismatch: %v", back.Metadata)
+	}
+	if len(back.Chain) != 5 {
+		t.Fatalf("chain length = %d", len(back.Chain))
+	}
+	if back.Chain[0].Type != CompAt || back.Chain[1].Text != "hello" {
+		t.Fatalf("chain[0,1] mismatch: %+v", back.Chain)
+	}
+	if back.Chain[2].Type != CompImage || back.Chain[2].Base64 != ev.Chain[2].Base64 {
+		t.Fatalf("image base64 mismatch")
+	}
+	if back.Chain[3].Data["app"] != "test" {
+		t.Fatalf("json data mismatch: %v", back.Chain[3].Data)
+	}
+	if back.Chain[4].Type != CompReply || back.Chain[4].ID != "r1" {
+		t.Fatalf("reply mismatch: %+v", back.Chain[4])
+	}
+}
+
+// TestP1ProtocolNegotiationMismatch 验证协议版本不匹配 → 明确失败（不 silent
+// fallback 到 legacy）。
+func TestP1ProtocolNegotiationMismatch(t *testing.T) {
+	srv := &serviceServer{impl: &Plugin{Name: "p"}}
+	_, err := srv.Register(context.Background(), &sdkv1.RegisterRequest{ProtocolVersion: 0})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("want FailedPrecondition on version mismatch, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "protocol version mismatch") {
+		t.Fatalf("want clear upgrade message, got %v", err)
+	}
 }

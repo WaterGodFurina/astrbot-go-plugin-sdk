@@ -2,7 +2,7 @@ package sdk
 
 import (
 	"context"
-	"encoding/json"
+
 	"errors"
 	"strings"
 	"testing"
@@ -83,7 +83,7 @@ func TestHandleHookDispatchTableCoversAllCategories(t *testing.T) {
 		}},
 	}
 	s := &serviceServer{impl: p}
-	eventJSON := mustJSON(&Event{SenderID: "u1", MessageStr: "hello"})
+	testEvent := EventToSDKEvent(&Event{SenderID: "u1", MessageStr: "hello"})
 
 	cases := []struct {
 		name    string
@@ -118,7 +118,7 @@ func TestHandleHookDispatchTableCoversAllCategories(t *testing.T) {
 			payloadJSON = mustJSON(v)
 		}
 		resp, err := s.HandleHook(context.Background(), &sdkv1.HandleHookRequest{
-			Name: c.name, EventJson: eventJSON, PayloadJson: payloadJSON,
+			Name: c.name, Event: testEvent, PayloadJson: payloadJSON,
 		})
 		if err != nil {
 			t.Fatalf("HandleHook(%s): %v", c.name, err)
@@ -262,8 +262,8 @@ func TestHandleHookResultHookEventFilter(t *testing.T) {
 	}}
 	s := &serviceServer{impl: p}
 	resp, err := s.HandleHook(context.Background(), &sdkv1.HandleHookRequest{
-		Name:      "r",
-		ChainJson: mustJSON([]Component{Text("hi")}),
+		Name:  "r",
+		Chain: componentsToProto([]Component{Text("hi")}),
 	})
 	if err != nil {
 		t.Fatalf("HandleHook: %v", err)
@@ -274,10 +274,7 @@ func TestHandleHookResultHookEventFilter(t *testing.T) {
 	if !resp.Stop || resp.Result == nil || !resp.Result.StopPropagation {
 		t.Fatalf("want Stop mirrored to resp.Stop / Result.StopPropagation, got %+v", resp)
 	}
-	var chain []Component
-	if err := json.Unmarshal(resp.ChainJson, &chain); err != nil {
-		t.Fatalf("chain: %v", err)
-	}
+	chain := protoToComponents(resp.Chain)
 	if len(chain) != 2 || chain[1].Text != "+d" {
 		t.Fatalf("want decorated chain, got %+v", chain)
 	}
