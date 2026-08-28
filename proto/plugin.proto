@@ -178,6 +178,100 @@ service HostService {
   // ── 桥接钩子（botpy/telegram 等兼容层）──
   rpc RegisterBridgeHook(BridgeHookRequest) returns (Empty);
   rpc UnregisterBridgeHook(BridgeHookRequest) returns (Empty);
+
+  // ── 大文件 Blob 存储（P0-2）──────────────────────────────
+  // 插件把大于 inline 阈值（1MB）的二进制交给宿主持久化，拿到一个受控
+  // handle；后续经 ReadBlob 分块读取。宿主统一管理生命周期（TTL/GC），
+  // 插件只传 handle，绝不传任意文件路径（防路径穿越）。
+  rpc CreateBlob(CreateBlobRequest) returns (CreateBlobResponse);
+  // ReadBlob 按 offset/limit 分块读，避免单次大缓冲。
+  rpc ReadBlob(ReadBlobRequest) returns (ReadBlobResponse);
+  rpc GetBlobInfo(GetBlobInfoRequest) returns (GetBlobInfoResponse);
+  rpc ReleaseBlob(ReleaseBlobRequest) returns (Empty);
+}
+
+
+// SDKEvent 是事件的 proto 原生表示（P1）。固定高频字段走 protobuf 原生，
+// 组件走 repeated Component（原生），仅动态 metadata 保留 JSON。新协议下
+// Event 分发路径 0 次 JSON 编解码。
+message SDKEvent {
+  string type          = 1;
+  string platform      = 2;
+  string platform_id   = 3;
+  string message_type  = 4;
+  string self_id       = 5;
+  string sender_id     = 6;
+  string sender_name   = 7;
+  string conv_id       = 8;
+  string group_name    = 9;
+  bool   is_group      = 10;
+  bool   is_at_bot     = 11;
+  bool   is_admin      = 12;
+  string message_str   = 13;
+  string plain_text    = 14;
+  string raw_message   = 15;
+  int64  timestamp     = 16;
+  string message_id    = 17;
+  repeated Component components = 18;
+  bytes  metadata_json = 19;
+}
+
+// BinaryPayload 承载二进制内容：≤inline 阈值内联 bytes；超过阈值走
+// FileReference（宿主 blob handle）。用于图片/音频/视频/文件/渲染结果等。
+message BinaryPayload {
+  oneof payload {
+    bytes inline_data = 1;
+    FileReference file = 2;
+  }
+  string mime_type = 3;
+  string filename = 4;
+}
+
+// FileReference 引用宿主 Blob 存储中的一个文件。handle_id 为高熵随机串，
+// 非文件路径，杜绝 ../ 等路径穿越；大小/MIME 便于下游无需 ReadBlob 也能
+// 决策。
+message FileReference {
+  string handle_id = 1;
+  int64 size = 2;
+  string mime_type = 3;
+  string filename = 4;
+  int64 expires_at = 5; // Unix 秒；宿主 TTL 判定用（仅信息性）。
+}
+
+message CreateBlobRequest {
+  // 待持久化的原始字节（一次一 blob，宿主负责落盘）。
+  bytes data = 1;
+  string mime_type = 2;
+  string filename = 3;
+  int32 ttl_seconds = 4; // 可选覆盖默认 TTL；<=0 用宿主默认。
+}
+
+message CreateBlobResponse {
+  FileReference file = 1;
+}
+
+message ReadBlobRequest {
+  string handle_id = 1;
+  int64 offset = 2; // 0 起
+  int32 limit = 3;  // 0 = 宿主默认块大小（1MB）
+}
+
+message ReadBlobResponse {
+  bytes data = 1;
+  bool eof = 2;
+  int64 total_size = 3;
+}
+
+message GetBlobInfoRequest {
+  string handle_id = 1;
+}
+
+message GetBlobInfoResponse {
+  FileReference file = 1;
+}
+
+message ReleaseBlobRequest {
+  string handle_id = 1;
 }
 
 message Empty {}
@@ -232,7 +326,11 @@ message ToolDesc {
   bytes params_json = 3;
 }
 
-message RegisterRequest {}
+message RegisterRequest {
+  // 连接级协议版本（P1 协商）：插件上报自身支持的最高协议版本。旧 SDK 不填
+  // =0 → 宿主按 legacy（event_json / chain_json）路径。P1_MIN_PROTOCOL=2。
+  int32 protocol_version = 1;
+}
 
 // SetLogLevelRequest carries the desired log level name
 // (DEBUG/INFO/WARNING/ERROR/CRITICAL) or "" to follow the host's global level.
@@ -253,6 +351,8 @@ message RegisterResponse {
   repeated ToolDesc tools = 9;
   // Web APIs registered via context.register_web_api (Python SDK).
   repeated WebApiDesc web_apis = 10;
+  // 宿主支持的协议版本（P1 协商）。插件据此决定后续事件/链走 native 还是 legacy。
+  int32 protocol_version = 11;
 }
 
 // WebApiDesc describes a Web UI API route a plugin registered
@@ -299,14 +399,14 @@ message HandleWebRequestResponse {
 message HandleCommandRequest {
   string name = 1;
   repeated string args = 2;
-  // JSON of sdk.Event.
-  bytes event_json = 3;
+  reserved 3; // 曾为 legacy event_json（P1 移除，不复用 field number）
+  // 原生事件（P1）：Event 路径 0 JSON。
+  SDKEvent event = 4;
 }
 
 message HandleCommandResponse {
   string text = 1;
-  // JSON of []sdk.Component (optional richer result chain).
-  bytes chain_json = 2;
+  reserved 2; // 曾为 legacy chain_json（P1 移除）
   bool stop = 3;
   // sent: the plugin performed a send operation during the handler (Python
   // AstrBot _has_send_oper semantics). The host must not fall through to the
@@ -315,12 +415,15 @@ message HandleCommandResponse {
   // EventResult aggregates the outcome flags; hosts read from `result` and
   // fall back to the legacy fields above when it is absent (old binaries).
   EventResult result = 5;
+  // 原生响应链（P1）：协议版本≥2 时优先，Response 链 0 JSON。
+  repeated Component chain = 6;
 }
 
 message HandleFilterRequest {
   string name = 1;
-  // JSON of sdk.Event.
-  bytes event_json = 2;
+  reserved 2; // 曾为 legacy event_json（P1 移除）
+  // 原生事件（P1）。
+  SDKEvent event = 3;
 }
 
 message HandleFilterResponse {
@@ -333,34 +436,36 @@ message HandleFilterResponse {
 
 message HandleHookRequest {
   string name = 1;
-  // JSON of sdk.Event.
-  bytes event_json = 2;
-  // JSON of []sdk.Component (current result chain for decoration hooks).
-  bytes chain_json = 3;
-  // JSON of the hook-specific payload (e.g. sdk.LLMResponse for
+  reserved 2, 3; // 曾为 legacy event_json / chain_json（P1 移除）
+  // 原生事件（P1）。
+  SDKEvent event = 5;
+  // 原生入站 result chain（P1）：装饰类钩子的当前结果链。
+  repeated Component chain = 6;
+  // JSON of the hook-specific dynamic payload (e.g. sdk.LLMResponse for
   // on_llm_response, sdk.ToolCall for on_using_llm_tool/on_llm_tool_respond,
-  // sdk.PluginError for on_plugin_error). Empty for hooks that only need the
-  // event (on_message / on_waiting_llm_request / lifecycle hooks).
+  // sdk.PluginError for on_plugin_error). 保留 JSON（动态结构，非 Message Chain）。
   bytes payload_json = 4;
 }
 
 // HookResponse replaces Empty as the HandleHook return value so hooks can
 // decorate the outgoing reply chain and/or stop the pipeline.
 message HookResponse {
-  // JSON of []sdk.Component (result chain decoration).
-  bytes chain_json = 1;
+  reserved 1; // 曾为 legacy chain_json（P1 移除）
   bool stop = 2;
   bool handled = 3;
   // sent: the plugin sent a message while running the hook.
   bool sent = 4;
   // EventResult aggregates the outcome flags (legacy fallback: stop/handled/sent).
   EventResult result = 5;
+  // 原生响应链（P1）：协议版本≥2 时优先。
+  repeated Component chain = 6;
 }
 
 message HandleLLMRequestRequest {
   string name = 1;
-  // JSON of sdk.Event.
-  bytes event_json = 2;
+  reserved 2; // 曾为 legacy event_json（P1 移除）
+  // 原生事件（P1）。
+  SDKEvent event = 5;
   // Current system prompt (may be modified by the plugin).
   string system_prompt = 3;
   // User prompt being sent to the model.
@@ -382,10 +487,11 @@ message HandleLLMRequestResponse {
 
 message HandleToolRequest {
   string name = 1;
-  // JSON of the tool arguments (map[string]any).
+  // JSON of the tool arguments (map[string]any)。动态参数结构，保留 JSON。
   bytes args_json = 2;
-  // JSON of sdk.Event.
-  bytes event_json = 3;
+  reserved 3; // 曾为 legacy event_json（P1 移除）
+  // 原生事件（P1）。
+  SDKEvent event = 4;
 }
 
 message HandleToolResponse {
@@ -433,8 +539,27 @@ message SendMessageRequest {
   string platform = 1;
   // Conversation id (group id or friend user id).
   string session_id = 2;
-  // JSON of []sdk.Component.
-  bytes chain_json = 3;
+  reserved 3; // 曾为 legacy chain_json（P1 移除）
+  // 原生组件链。媒体组件可携带 BinaryPayload（≤inline 阈值内联 bytes；
+  // >阈值走 FileReference blob handle），宿主读 blob 组装平台消息。
+  repeated Component chain_components = 4;
+}
+
+// Component 是消息链的 proto 原生表示（P0-2），与 SDK 的扁平 Component
+// 结构对齐；媒体二进制经 payload（BinaryPayload）承载。
+message Component {
+  string type = 1;
+  string text = 2;
+  string target_id = 3;
+  string name = 4;
+  string url = 5;
+  string path = 6;
+  string file = 7;
+  bytes base64_data = 8;
+  string file_id = 9;
+  string id = 10;
+  bytes data_json = 11;      // Json 卡片等动态结构（保留 JSON）
+  BinaryPayload payload = 12; // 媒体二进制（inline bytes 或 FileReference）
 }
 
 message RecallMessageRequest {
@@ -507,8 +632,10 @@ message TextToImageRequest {
 }
 
 message TextToImageResponse {
-  // PNG image bytes, base64-encoded (no data: prefix).
+  // PNG image bytes, base64-encoded (no data: prefix). 保留：旧 SDK 依赖。
   string image_base64 = 1;
+  // PNG image raw bytes. 新增（P0-1）：新 SDK 优先读它，免去一次 base64 往返。
+  bytes image_bytes = 2;
 }
 
 message HtmlRenderRequest {
@@ -521,8 +648,10 @@ message HtmlRenderRequest {
 }
 
 message HtmlRenderResponse {
-  // PNG bytes base64（无 data: 前缀）。
+  // PNG bytes base64（无 data: 前缀）。保留：旧 SDK 依赖。
   string image_base64 = 1;
+  // PNG image raw bytes. 新增（P0-1）：新 SDK 优先读它。
+  bytes image_bytes = 2;
 }
 
 // --- Conversation management payloads ---------------------------------------
@@ -763,8 +892,9 @@ message BridgeHookRequest {
 }
 
 message FeedSessionWaitRequest {
-  // JSON of sdk.Event (same encoding as HandleFilter's event_json).
-  bytes event_json = 1;
+  reserved 1; // 曾为 legacy event_json（P1 移除）
+  // 原生事件（P1）。
+  SDKEvent event = 2;
 }
 
 message FeedSessionWaitResponse {

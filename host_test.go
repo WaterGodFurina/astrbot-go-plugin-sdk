@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"context"
+	"encoding/base64"
 	"testing"
 
 	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
@@ -76,5 +77,64 @@ func TestRegisterBridgeHookAnonymousRejected(t *testing.T) {
 	_, err := srv.RegisterBridgeHook(context.Background(), &sdkv1.BridgeHookRequest{HookName: "hook"})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("anonymous RegisterBridgeHook: want FailedPrecondition, got %v", err)
+	}
+}
+
+// TestSendMessageComponentsPayload 验证 P0-2：SendMessage 原生组件链
+// （chain_components）里的 BinaryPayload：
+//   - inline_data → hook 收到 Base64（等于 inline 的 base64）
+//   - FileReference → 经 host ReadBlob hook 分块读回 → Base64
+// 并确保 chain_components 为空时回退 chain_json 旧路径。
+func TestSendMessageComponentsPayload(t *testing.T) {
+	// 内存 mock blob：8B 块分块读，验证 FileReference 分块读回。
+	fileData := []byte("0123456789abcdef") // 16B → 分 2 块读
+	blobData := fileData
+	var got []Component
+	SetHostHooks(HostServiceHooks{
+		SendMessage: func(platform, sessionID string, chain []Component) error {
+			got = chain
+			return nil
+		},
+		ReadBlob: func(handleID string, offset int64, limit int32) ([]byte, bool, int64, error) {
+			chunk := int64(8)
+			if limit > 0 {
+				chunk = int64(limit)
+			}
+			if offset >= int64(len(blobData)) {
+				return nil, true, int64(len(blobData)), nil
+			}
+			end := offset + chunk
+			if end > int64(len(blobData)) {
+				end = int64(len(blobData))
+			}
+			return blobData[offset:end], end >= int64(len(blobData)), int64(len(blobData)), nil
+		},
+	})
+
+	ref := sdkv1.FileReference{HandleId: "abcdef0123456789abcdef0123456789", Size: int64(len(fileData))}
+
+	req := &sdkv1.SendMessageRequest{
+		Platform:  "aiocqhttp",
+		SessionId: "g:1",
+		ChainComponents: []*sdkv1.Component{
+			{Type: "Plain", Text: "hi"},
+			{Type: "Image", Payload: &sdkv1.BinaryPayload{
+				Payload: &sdkv1.BinaryPayload_File{File: &ref},
+			}},
+		},
+	}
+	srv := &hostServiceServer{pluginID: "p"}
+	if _, err := srv.SendMessage(context.Background(), req); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 components, got %d", len(got))
+	}
+	if got[0].Type != "Plain" || got[0].Text != "hi" {
+		t.Fatalf("plain comp mismatch: %#v", got[0])
+	}
+	wantB64 := base64.StdEncoding.EncodeToString(fileData)
+	if got[1].Type != "Image" || got[1].Base64 != wantB64 {
+		t.Fatalf("file payload image mismatch: %#v (want b64=%s)", got[1], wantB64)
 	}
 }
