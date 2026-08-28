@@ -135,6 +135,15 @@ func protoToComponents(comps []*sdkv1.Component) []Component {
 		if len(c.Base64Data) > 0 {
 			sc.Base64 = base64.StdEncoding.EncodeToString(c.Base64Data)
 		}
+		if c.Payload != nil {
+			// 仅还原 inline_data（内联二进制无需宿主 blob store，插件侧可直接
+			// 解码）；file 型 payload 依赖宿主 blob store，由 host 侧
+			// protoComponentToSDK 经 ReadBlob 还原，插件收方向不出现该形态。
+			if p, ok := c.Payload.Payload.(*sdkv1.BinaryPayload_InlineData); ok {
+				sc.Base64 = base64.StdEncoding.EncodeToString(p.InlineData)
+				sc.File = ""
+			}
+		}
 		if len(c.DataJson) > 0 {
 			var m map[string]any
 			if json.Unmarshal(c.DataJson, &m) == nil {
