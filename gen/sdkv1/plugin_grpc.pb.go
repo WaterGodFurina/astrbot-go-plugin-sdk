@@ -725,46 +725,53 @@ var PluginService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	HostService_CallAction_FullMethodName                  = "/astrbot.sdk.v1.HostService/CallAction"
-	HostService_SendMessage_FullMethodName                 = "/astrbot.sdk.v1.HostService/SendMessage"
-	HostService_RecallMessage_FullMethodName               = "/astrbot.sdk.v1.HostService/RecallMessage"
-	HostService_GetConfig_FullMethodName                   = "/astrbot.sdk.v1.HostService/GetConfig"
-	HostService_SetConfig_FullMethodName                   = "/astrbot.sdk.v1.HostService/SetConfig"
-	HostService_ChatLLM_FullMethodName                     = "/astrbot.sdk.v1.HostService/ChatLLM"
-	HostService_React_FullMethodName                       = "/astrbot.sdk.v1.HostService/React"
-	HostService_TextToImage_FullMethodName                 = "/astrbot.sdk.v1.HostService/TextToImage"
-	HostService_HtmlRender_FullMethodName                  = "/astrbot.sdk.v1.HostService/HtmlRender"
-	HostService_GetCurrConversationID_FullMethodName       = "/astrbot.sdk.v1.HostService/GetCurrConversationID"
-	HostService_NewConversation_FullMethodName             = "/astrbot.sdk.v1.HostService/NewConversation"
-	HostService_GetConversation_FullMethodName             = "/astrbot.sdk.v1.HostService/GetConversation"
-	HostService_GetConversations_FullMethodName            = "/astrbot.sdk.v1.HostService/GetConversations"
-	HostService_DeleteConversation_FullMethodName          = "/astrbot.sdk.v1.HostService/DeleteConversation"
-	HostService_SwitchConversation_FullMethodName          = "/astrbot.sdk.v1.HostService/SwitchConversation"
-	HostService_UpdateConversationTitle_FullMethodName     = "/astrbot.sdk.v1.HostService/UpdateConversationTitle"
-	HostService_UpdateConversationPersonaID_FullMethodName = "/astrbot.sdk.v1.HostService/UpdateConversationPersonaID"
-	HostService_GetPersonas_FullMethodName                 = "/astrbot.sdk.v1.HostService/GetPersonas"
-	HostService_GetDefaultPersona_FullMethodName           = "/astrbot.sdk.v1.HostService/GetDefaultPersona"
-	HostService_GetPersonaTree_FullMethodName              = "/astrbot.sdk.v1.HostService/GetPersonaTree"
-	HostService_ResolveSelectedPersona_FullMethodName      = "/astrbot.sdk.v1.HostService/ResolveSelectedPersona"
-	HostService_ListProviders_FullMethodName               = "/astrbot.sdk.v1.HostService/ListProviders"
-	HostService_GetUsingProvider_FullMethodName            = "/astrbot.sdk.v1.HostService/GetUsingProvider"
-	HostService_SetProvider_FullMethodName                 = "/astrbot.sdk.v1.HostService/SetProvider"
-	HostService_GetProviderModels_FullMethodName           = "/astrbot.sdk.v1.HostService/GetProviderModels"
-	HostService_GetPluginRegistry_FullMethodName           = "/astrbot.sdk.v1.HostService/GetPluginRegistry"
-	HostService_GetStar_FullMethodName                     = "/astrbot.sdk.v1.HostService/GetStar"
-	HostService_SetPluginEnabled_FullMethodName            = "/astrbot.sdk.v1.HostService/SetPluginEnabled"
-	HostService_InstallPlugin_FullMethodName               = "/astrbot.sdk.v1.HostService/InstallPlugin"
-	HostService_UninstallPlugin_FullMethodName             = "/astrbot.sdk.v1.HostService/UninstallPlugin"
-	HostService_ListCommandDescriptors_FullMethodName      = "/astrbot.sdk.v1.HostService/ListCommandDescriptors"
-	HostService_ListPlatforms_FullMethodName               = "/astrbot.sdk.v1.HostService/ListPlatforms"
-	HostService_RegisterSessionWait_FullMethodName         = "/astrbot.sdk.v1.HostService/RegisterSessionWait"
-	HostService_UnregisterSessionWait_FullMethodName       = "/astrbot.sdk.v1.HostService/UnregisterSessionWait"
-	HostService_RegisterBridgeHook_FullMethodName          = "/astrbot.sdk.v1.HostService/RegisterBridgeHook"
-	HostService_UnregisterBridgeHook_FullMethodName        = "/astrbot.sdk.v1.HostService/UnregisterBridgeHook"
-	HostService_CreateBlob_FullMethodName                  = "/astrbot.sdk.v1.HostService/CreateBlob"
-	HostService_ReadBlob_FullMethodName                    = "/astrbot.sdk.v1.HostService/ReadBlob"
-	HostService_GetBlobInfo_FullMethodName                 = "/astrbot.sdk.v1.HostService/GetBlobInfo"
-	HostService_ReleaseBlob_FullMethodName                 = "/astrbot.sdk.v1.HostService/ReleaseBlob"
+	HostService_CallAction_FullMethodName                   = "/astrbot.sdk.v1.HostService/CallAction"
+	HostService_SendMessage_FullMethodName                  = "/astrbot.sdk.v1.HostService/SendMessage"
+	HostService_RecallMessage_FullMethodName                = "/astrbot.sdk.v1.HostService/RecallMessage"
+	HostService_GetConfig_FullMethodName                    = "/astrbot.sdk.v1.HostService/GetConfig"
+	HostService_SetConfig_FullMethodName                    = "/astrbot.sdk.v1.HostService/SetConfig"
+	HostService_ChatLLM_FullMethodName                      = "/astrbot.sdk.v1.HostService/ChatLLM"
+	HostService_React_FullMethodName                        = "/astrbot.sdk.v1.HostService/React"
+	HostService_TextToImage_FullMethodName                  = "/astrbot.sdk.v1.HostService/TextToImage"
+	HostService_HtmlRender_FullMethodName                   = "/astrbot.sdk.v1.HostService/HtmlRender"
+	HostService_GetCurrConversationID_FullMethodName        = "/astrbot.sdk.v1.HostService/GetCurrConversationID"
+	HostService_NewConversation_FullMethodName              = "/astrbot.sdk.v1.HostService/NewConversation"
+	HostService_GetConversation_FullMethodName              = "/astrbot.sdk.v1.HostService/GetConversation"
+	HostService_GetConversations_FullMethodName             = "/astrbot.sdk.v1.HostService/GetConversations"
+	HostService_DeleteConversation_FullMethodName           = "/astrbot.sdk.v1.HostService/DeleteConversation"
+	HostService_SwitchConversation_FullMethodName           = "/astrbot.sdk.v1.HostService/SwitchConversation"
+	HostService_UpdateConversationTitle_FullMethodName      = "/astrbot.sdk.v1.HostService/UpdateConversationTitle"
+	HostService_UpdateConversationPersonaID_FullMethodName  = "/astrbot.sdk.v1.HostService/UpdateConversationPersonaID"
+	HostService_GetPersonas_FullMethodName                  = "/astrbot.sdk.v1.HostService/GetPersonas"
+	HostService_GetDefaultPersona_FullMethodName            = "/astrbot.sdk.v1.HostService/GetDefaultPersona"
+	HostService_GetPersonaTree_FullMethodName               = "/astrbot.sdk.v1.HostService/GetPersonaTree"
+	HostService_ResolveSelectedPersona_FullMethodName       = "/astrbot.sdk.v1.HostService/ResolveSelectedPersona"
+	HostService_ListProviders_FullMethodName                = "/astrbot.sdk.v1.HostService/ListProviders"
+	HostService_GetUsingProvider_FullMethodName             = "/astrbot.sdk.v1.HostService/GetUsingProvider"
+	HostService_SetProvider_FullMethodName                  = "/astrbot.sdk.v1.HostService/SetProvider"
+	HostService_GetProviderModels_FullMethodName            = "/astrbot.sdk.v1.HostService/GetProviderModels"
+	HostService_GetPluginRegistry_FullMethodName            = "/astrbot.sdk.v1.HostService/GetPluginRegistry"
+	HostService_GetStar_FullMethodName                      = "/astrbot.sdk.v1.HostService/GetStar"
+	HostService_SetPluginEnabled_FullMethodName             = "/astrbot.sdk.v1.HostService/SetPluginEnabled"
+	HostService_InstallPlugin_FullMethodName                = "/astrbot.sdk.v1.HostService/InstallPlugin"
+	HostService_UninstallPlugin_FullMethodName              = "/astrbot.sdk.v1.HostService/UninstallPlugin"
+	HostService_ListCommandDescriptors_FullMethodName       = "/astrbot.sdk.v1.HostService/ListCommandDescriptors"
+	HostService_ListPlatforms_FullMethodName                = "/astrbot.sdk.v1.HostService/ListPlatforms"
+	HostService_RegisterSessionWait_FullMethodName          = "/astrbot.sdk.v1.HostService/RegisterSessionWait"
+	HostService_UnregisterSessionWait_FullMethodName        = "/astrbot.sdk.v1.HostService/UnregisterSessionWait"
+	HostService_RegisterBridgeHook_FullMethodName           = "/astrbot.sdk.v1.HostService/RegisterBridgeHook"
+	HostService_UnregisterBridgeHook_FullMethodName         = "/astrbot.sdk.v1.HostService/UnregisterBridgeHook"
+	HostService_CreateBlob_FullMethodName                   = "/astrbot.sdk.v1.HostService/CreateBlob"
+	HostService_ReadBlob_FullMethodName                     = "/astrbot.sdk.v1.HostService/ReadBlob"
+	HostService_GetBlobInfo_FullMethodName                  = "/astrbot.sdk.v1.HostService/GetBlobInfo"
+	HostService_ReleaseBlob_FullMethodName                  = "/astrbot.sdk.v1.HostService/ReleaseBlob"
+	HostService_ListSkills_FullMethodName                   = "/astrbot.sdk.v1.HostService/ListSkills"
+	HostService_SetSkillActive_FullMethodName               = "/astrbot.sdk.v1.HostService/SetSkillActive"
+	HostService_DeleteSkill_FullMethodName                  = "/astrbot.sdk.v1.HostService/DeleteSkill"
+	HostService_GetPlatformMessageHistory_FullMethodName    = "/astrbot.sdk.v1.HostService/GetPlatformMessageHistory"
+	HostService_InsertPlatformMessageHistory_FullMethodName = "/astrbot.sdk.v1.HostService/InsertPlatformMessageHistory"
+	HostService_UpdatePlatformMessageHistory_FullMethodName = "/astrbot.sdk.v1.HostService/UpdatePlatformMessageHistory"
+	HostService_DeletePlatformMessageHistory_FullMethodName = "/astrbot.sdk.v1.HostService/DeletePlatformMessageHistory"
 )
 
 // HostServiceClient is the client API for HostService service.
@@ -864,6 +871,22 @@ type HostServiceClient interface {
 	ReadBlob(ctx context.Context, in *ReadBlobRequest, opts ...grpc.CallOption) (*ReadBlobResponse, error)
 	GetBlobInfo(ctx context.Context, in *GetBlobInfoRequest, opts ...grpc.CallOption) (*GetBlobInfoResponse, error)
 	ReleaseBlob(ctx context.Context, in *ReleaseBlobRequest, opts ...grpc.CallOption) (*Empty, error)
+	// ── 技能（Skills，宿主 internal/skills 能力 → 插件可读可改）──
+	// ListSkills 返回宿主技能管理器中的全部技能（SkillInfo JSON 列表）。
+	ListSkills(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*SkillsResponse, error)
+	// SetSkillActive 启用/禁用指定技能。
+	SetSkillActive(ctx context.Context, in *SetSkillActiveRequest, opts ...grpc.CallOption) (*Empty, error)
+	// DeleteSkill 删除指定技能。
+	DeleteSkill(ctx context.Context, in *DeleteSkillRequest, opts ...grpc.CallOption) (*Empty, error)
+	// ── 平台消息历史（宿主 db platform_message_history 表 → 插件可读可改）──
+	// GetPlatformMessageHistory 按平台/用户取最近 n 条消息记录。
+	GetPlatformMessageHistory(ctx context.Context, in *GetPMHistoryRequest, opts ...grpc.CallOption) (*PMHistoryRecordsResponse, error)
+	// InsertPlatformMessageHistory 插入一条平台消息记录。
+	InsertPlatformMessageHistory(ctx context.Context, in *InsertPMHistoryRequest, opts ...grpc.CallOption) (*PMHistoryRecordResponse, error)
+	// UpdatePlatformMessageHistory 更新一条记录（content / llm_checkpoint_id）。
+	UpdatePlatformMessageHistory(ctx context.Context, in *UpdatePMHistoryRequest, opts ...grpc.CallOption) (*Empty, error)
+	// DeletePlatformMessageHistory 按 ID 删除一条记录。
+	DeletePlatformMessageHistory(ctx context.Context, in *DeletePMHistoryRequest, opts ...grpc.CallOption) (*Empty, error)
 }
 
 type hostServiceClient struct {
@@ -1274,6 +1297,76 @@ func (c *hostServiceClient) ReleaseBlob(ctx context.Context, in *ReleaseBlobRequ
 	return out, nil
 }
 
+func (c *hostServiceClient) ListSkills(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*SkillsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SkillsResponse)
+	err := c.cc.Invoke(ctx, HostService_ListSkills_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) SetSkillActive(ctx context.Context, in *SetSkillActiveRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_SetSkillActive_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) DeleteSkill(ctx context.Context, in *DeleteSkillRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_DeleteSkill_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) GetPlatformMessageHistory(ctx context.Context, in *GetPMHistoryRequest, opts ...grpc.CallOption) (*PMHistoryRecordsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PMHistoryRecordsResponse)
+	err := c.cc.Invoke(ctx, HostService_GetPlatformMessageHistory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) InsertPlatformMessageHistory(ctx context.Context, in *InsertPMHistoryRequest, opts ...grpc.CallOption) (*PMHistoryRecordResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PMHistoryRecordResponse)
+	err := c.cc.Invoke(ctx, HostService_InsertPlatformMessageHistory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) UpdatePlatformMessageHistory(ctx context.Context, in *UpdatePMHistoryRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_UpdatePlatformMessageHistory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) DeletePlatformMessageHistory(ctx context.Context, in *DeletePMHistoryRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_DeletePlatformMessageHistory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // HostServiceServer is the server API for HostService service.
 // All implementations must embed UnimplementedHostServiceServer
 // for forward compatibility.
@@ -1371,6 +1464,22 @@ type HostServiceServer interface {
 	ReadBlob(context.Context, *ReadBlobRequest) (*ReadBlobResponse, error)
 	GetBlobInfo(context.Context, *GetBlobInfoRequest) (*GetBlobInfoResponse, error)
 	ReleaseBlob(context.Context, *ReleaseBlobRequest) (*Empty, error)
+	// ── 技能（Skills，宿主 internal/skills 能力 → 插件可读可改）──
+	// ListSkills 返回宿主技能管理器中的全部技能（SkillInfo JSON 列表）。
+	ListSkills(context.Context, *Empty) (*SkillsResponse, error)
+	// SetSkillActive 启用/禁用指定技能。
+	SetSkillActive(context.Context, *SetSkillActiveRequest) (*Empty, error)
+	// DeleteSkill 删除指定技能。
+	DeleteSkill(context.Context, *DeleteSkillRequest) (*Empty, error)
+	// ── 平台消息历史（宿主 db platform_message_history 表 → 插件可读可改）──
+	// GetPlatformMessageHistory 按平台/用户取最近 n 条消息记录。
+	GetPlatformMessageHistory(context.Context, *GetPMHistoryRequest) (*PMHistoryRecordsResponse, error)
+	// InsertPlatformMessageHistory 插入一条平台消息记录。
+	InsertPlatformMessageHistory(context.Context, *InsertPMHistoryRequest) (*PMHistoryRecordResponse, error)
+	// UpdatePlatformMessageHistory 更新一条记录（content / llm_checkpoint_id）。
+	UpdatePlatformMessageHistory(context.Context, *UpdatePMHistoryRequest) (*Empty, error)
+	// DeletePlatformMessageHistory 按 ID 删除一条记录。
+	DeletePlatformMessageHistory(context.Context, *DeletePMHistoryRequest) (*Empty, error)
 	mustEmbedUnimplementedHostServiceServer()
 }
 
@@ -1500,6 +1609,27 @@ func (UnimplementedHostServiceServer) GetBlobInfo(context.Context, *GetBlobInfoR
 }
 func (UnimplementedHostServiceServer) ReleaseBlob(context.Context, *ReleaseBlobRequest) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReleaseBlob not implemented")
+}
+func (UnimplementedHostServiceServer) ListSkills(context.Context, *Empty) (*SkillsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListSkills not implemented")
+}
+func (UnimplementedHostServiceServer) SetSkillActive(context.Context, *SetSkillActiveRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetSkillActive not implemented")
+}
+func (UnimplementedHostServiceServer) DeleteSkill(context.Context, *DeleteSkillRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteSkill not implemented")
+}
+func (UnimplementedHostServiceServer) GetPlatformMessageHistory(context.Context, *GetPMHistoryRequest) (*PMHistoryRecordsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetPlatformMessageHistory not implemented")
+}
+func (UnimplementedHostServiceServer) InsertPlatformMessageHistory(context.Context, *InsertPMHistoryRequest) (*PMHistoryRecordResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method InsertPlatformMessageHistory not implemented")
+}
+func (UnimplementedHostServiceServer) UpdatePlatformMessageHistory(context.Context, *UpdatePMHistoryRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdatePlatformMessageHistory not implemented")
+}
+func (UnimplementedHostServiceServer) DeletePlatformMessageHistory(context.Context, *DeletePMHistoryRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeletePlatformMessageHistory not implemented")
 }
 func (UnimplementedHostServiceServer) mustEmbedUnimplementedHostServiceServer() {}
 func (UnimplementedHostServiceServer) testEmbeddedByValue()                     {}
@@ -2242,6 +2372,132 @@ func _HostService_ReleaseBlob_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HostService_ListSkills_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).ListSkills(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_ListSkills_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).ListSkills(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_SetSkillActive_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetSkillActiveRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).SetSkillActive(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_SetSkillActive_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).SetSkillActive(ctx, req.(*SetSkillActiveRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_DeleteSkill_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteSkillRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).DeleteSkill(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_DeleteSkill_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).DeleteSkill(ctx, req.(*DeleteSkillRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_GetPlatformMessageHistory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetPMHistoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).GetPlatformMessageHistory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_GetPlatformMessageHistory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).GetPlatformMessageHistory(ctx, req.(*GetPMHistoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_InsertPlatformMessageHistory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InsertPMHistoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).InsertPlatformMessageHistory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_InsertPlatformMessageHistory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).InsertPlatformMessageHistory(ctx, req.(*InsertPMHistoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_UpdatePlatformMessageHistory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdatePMHistoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).UpdatePlatformMessageHistory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_UpdatePlatformMessageHistory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).UpdatePlatformMessageHistory(ctx, req.(*UpdatePMHistoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_DeletePlatformMessageHistory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeletePMHistoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).DeletePlatformMessageHistory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_DeletePlatformMessageHistory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).DeletePlatformMessageHistory(ctx, req.(*DeletePMHistoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // HostService_ServiceDesc is the grpc.ServiceDesc for HostService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2408,6 +2664,34 @@ var HostService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReleaseBlob",
 			Handler:    _HostService_ReleaseBlob_Handler,
+		},
+		{
+			MethodName: "ListSkills",
+			Handler:    _HostService_ListSkills_Handler,
+		},
+		{
+			MethodName: "SetSkillActive",
+			Handler:    _HostService_SetSkillActive_Handler,
+		},
+		{
+			MethodName: "DeleteSkill",
+			Handler:    _HostService_DeleteSkill_Handler,
+		},
+		{
+			MethodName: "GetPlatformMessageHistory",
+			Handler:    _HostService_GetPlatformMessageHistory_Handler,
+		},
+		{
+			MethodName: "InsertPlatformMessageHistory",
+			Handler:    _HostService_InsertPlatformMessageHistory_Handler,
+		},
+		{
+			MethodName: "UpdatePlatformMessageHistory",
+			Handler:    _HostService_UpdatePlatformMessageHistory_Handler,
+		},
+		{
+			MethodName: "DeletePlatformMessageHistory",
+			Handler:    _HostService_DeletePlatformMessageHistory_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -490,6 +490,151 @@ func (h *host) ReleaseBlob(handleID string) error {
 	return err
 }
 
+// ListSkills 返回宿主技能管理器中的全部技能（强类型 SkillInfo）。
+func (h *host) ListSkills() ([]SkillInfo, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.ListSkills(ctx, &sdkv1.Empty{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SkillInfo, 0, len(resp.SkillsJson))
+	for _, raw := range resp.SkillsJson {
+		var m map[string]any
+		if json.Unmarshal(raw, &m) == nil {
+			var s SkillInfo
+			s.FromMap(m)
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+// SetSkillActive 启用/禁用指定技能。
+func (h *host) SetSkillActive(name string, active bool) error {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	_, err = svc.SetSkillActive(ctx, &sdkv1.SetSkillActiveRequest{Name: name, Active: active})
+	return err
+}
+
+// DeleteSkill 删除指定技能。
+func (h *host) DeleteSkill(name string) error {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	_, err = svc.DeleteSkill(ctx, &sdkv1.DeleteSkillRequest{Name: name})
+	return err
+}
+
+// GetPlatformMessageHistory 按平台/用户取最近 limit 条平台消息记录
+//（强类型 PMHistoryRecord）。
+func (h *host) GetPlatformMessageHistory(platformID, userID string, limit int32) ([]PMHistoryRecord, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.GetPlatformMessageHistory(ctx, &sdkv1.GetPMHistoryRequest{
+		PlatformId: platformID,
+		UserId:     userID,
+		Limit:      limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PMHistoryRecord, 0, len(resp.RecordsJson))
+	for _, raw := range resp.RecordsJson {
+		var m map[string]any
+		if json.Unmarshal(raw, &m) == nil {
+			var r PMHistoryRecord
+			r.FromMap(m)
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// InsertPlatformMessageHistory 插入一条平台消息记录（content 为可 JSON 化的
+// dict / list / str），返回完整记录（强类型 PMHistoryRecord，id/created_at
+// 由宿主生成）。
+func (h *host) InsertPlatformMessageHistory(platformID, userID, senderID string, content any, llmCheckpointID string, maxMessages int32) (PMHistoryRecord, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return PMHistoryRecord{}, err
+	}
+	contentJSON, err := json.Marshal(content)
+	if err != nil {
+		return PMHistoryRecord{}, err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.InsertPlatformMessageHistory(ctx, &sdkv1.InsertPMHistoryRequest{
+		PlatformId:       platformID,
+		UserId:           userID,
+		SenderId:         senderID,
+		ContentJson:      contentJSON,
+		LlmCheckpointId:  llmCheckpointID,
+		MaxMessages:      maxMessages,
+	})
+	if err != nil {
+		return PMHistoryRecord{}, err
+	}
+	var r PMHistoryRecord
+	if len(resp.RecordJson) > 0 {
+		var m map[string]any
+		if json.Unmarshal(resp.RecordJson, &m) == nil {
+			r.FromMap(m)
+		}
+	}
+	return r, nil
+}
+
+// UpdatePlatformMessageHistory 更新一条记录（content 或 llm_checkpoint_id，
+// 传 nil 表示不更新对应字段）。
+func (h *host) UpdatePlatformMessageHistory(id int64, content any, llmCheckpointID string) error {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return err
+	}
+	contentJSON, err := json.Marshal(content)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	_, err = svc.UpdatePlatformMessageHistory(ctx, &sdkv1.UpdatePMHistoryRequest{
+		Id:              id,
+		ContentJson:     contentJSON,
+		LlmCheckpointId: llmCheckpointID,
+	})
+	return err
+}
+
+// DeletePlatformMessageHistory 按 ID 删除一条平台消息记录。
+func (h *host) DeletePlatformMessageHistory(id int64) error {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	_, err = svc.DeletePlatformMessageHistory(ctx, &sdkv1.DeletePMHistoryRequest{Id: id})
+	return err
+}
+
 // ---------------------------------------------------------------------------
 // Host side: serving the HostService over the broker.
 // ---------------------------------------------------------------------------
@@ -602,6 +747,25 @@ type HostServiceHooks struct {
 	GetBlobInfo func(handleID string) (*sdkv1.FileReference, error)
 	// ReleaseBlob 主动标记删除（最终删除仍由宿主 TTL/GC 判定）。
 	ReleaseBlob func(handleID string) error
+
+	// ── 技能（Skills，宿主 internal/skills 能力）──
+	// ListSkills 返回宿主技能管理器的全部技能（GB SkillInfo JSON）。
+	ListSkills func() []map[string]any
+	// SetSkillActive 启用/禁用指定技能。
+	SetSkillActive func(name string, active bool) error
+	// DeleteSkill 删除指定技能。
+	DeleteSkill func(name string) error
+
+	// ── 平台消息历史（宿主 db platform_message_history）──
+	// GetPlatformMessageHistory 按平台/用户取最近 limit 条记录。
+	GetPlatformMessageHistory func(platformID, userID string, limit int32) []map[string]any
+	// InsertPlatformMessageHistory 插入一条记录，返回完整记录 dict
+	//（id/created_at 由宿主生成）。
+	InsertPlatformMessageHistory func(platformID, userID, senderID string, content any, llmCheckpointID string, maxMessages int32) map[string]any
+	// UpdatePlatformMessageHistory 更新一条记录（content 或 llm_checkpoint_id）。
+	UpdatePlatformMessageHistory func(id int64, content any, llmCheckpointID string) error
+	// DeletePlatformMessageHistory 按 ID 删除一条记录。
+	DeletePlatformMessageHistory func(id int64) error
 }
 
 var (
@@ -1644,6 +1808,131 @@ func (s *hostServiceServer) ReleaseBlob(_ context.Context, req *sdkv1.ReleaseBlo
 		return &sdkv1.Empty{}, nil
 	}
 	if err := h.ReleaseBlob(req.HandleId); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
+}
+
+// ListSkills 返回宿主技能管理器中的全部技能（每条 SkillInfo JSON）。
+func (s *hostServiceServer) ListSkills(_ context.Context, _ *sdkv1.Empty) (*sdkv1.SkillsResponse, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.ListSkills == nil {
+		return &sdkv1.SkillsResponse{}, nil
+	}
+	resp := &sdkv1.SkillsResponse{}
+	for _, x := range h.ListSkills() {
+		out, err := json.Marshal(x)
+		if err != nil {
+			return nil, err
+		}
+		resp.SkillsJson = append(resp.SkillsJson, out)
+	}
+	return resp, nil
+}
+
+// SetSkillActive 启用/禁用指定技能。
+func (s *hostServiceServer) SetSkillActive(_ context.Context, req *sdkv1.SetSkillActiveRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.SetSkillActive == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	if err := h.SetSkillActive(req.Name, req.Active); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
+}
+
+// DeleteSkill 删除指定技能。
+func (s *hostServiceServer) DeleteSkill(_ context.Context, req *sdkv1.DeleteSkillRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.DeleteSkill == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	if err := h.DeleteSkill(req.Name); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
+}
+
+// GetPlatformMessageHistory 按平台/用户取最近 limit 条平台消息记录。
+func (s *hostServiceServer) GetPlatformMessageHistory(_ context.Context, req *sdkv1.GetPMHistoryRequest) (*sdkv1.PMHistoryRecordsResponse, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.GetPlatformMessageHistory == nil {
+		return &sdkv1.PMHistoryRecordsResponse{}, nil
+	}
+	resp := &sdkv1.PMHistoryRecordsResponse{}
+	for _, r := range h.GetPlatformMessageHistory(req.PlatformId, req.UserId, req.Limit) {
+		out, err := json.Marshal(r)
+		if err != nil {
+			return nil, err
+		}
+		resp.RecordsJson = append(resp.RecordsJson, out)
+	}
+	return resp, nil
+}
+
+// InsertPlatformMessageHistory 插入一条平台消息记录（content 为 JSON，宿主存原样）。
+func (s *hostServiceServer) InsertPlatformMessageHistory(_ context.Context, req *sdkv1.InsertPMHistoryRequest) (*sdkv1.PMHistoryRecordResponse, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.InsertPlatformMessageHistory == nil {
+		return &sdkv1.PMHistoryRecordResponse{}, nil
+	}
+	var content any
+	if len(req.ContentJson) > 0 {
+		json.Unmarshal(req.ContentJson, &content)
+	}
+	r := h.InsertPlatformMessageHistory(req.PlatformId, req.UserId, req.SenderId, content, req.LlmCheckpointId, req.MaxMessages)
+	out, err := json.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	return &sdkv1.PMHistoryRecordResponse{RecordJson: out}, nil
+}
+
+// UpdatePlatformMessageHistory 更新一条记录（content 可选；llm_checkpoint_id 空表示不更新）。
+func (s *hostServiceServer) UpdatePlatformMessageHistory(_ context.Context, req *sdkv1.UpdatePMHistoryRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.UpdatePlatformMessageHistory == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	var content any
+	if len(req.ContentJson) > 0 {
+		json.Unmarshal(req.ContentJson, &content)
+	}
+	if err := h.UpdatePlatformMessageHistory(req.Id, content, req.LlmCheckpointId); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
+}
+
+// DeletePlatformMessageHistory 按 ID 删除一条平台消息记录。
+func (s *hostServiceServer) DeletePlatformMessageHistory(_ context.Context, req *sdkv1.DeletePMHistoryRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.DeletePlatformMessageHistory == nil {
+		return &sdkv1.Empty{}, nil
+	}
+	if err := h.DeletePlatformMessageHistory(req.Id); err != nil {
 		return nil, err
 	}
 	return &sdkv1.Empty{}, nil

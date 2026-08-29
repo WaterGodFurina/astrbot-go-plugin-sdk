@@ -189,6 +189,24 @@ service HostService {
   rpc ReadBlob(ReadBlobRequest) returns (ReadBlobResponse);
   rpc GetBlobInfo(GetBlobInfoRequest) returns (GetBlobInfoResponse);
   rpc ReleaseBlob(ReleaseBlobRequest) returns (Empty);
+
+  // ── 技能（Skills，宿主 internal/skills 能力 → 插件可读可改）──
+  // ListSkills 返回宿主技能管理器中的全部技能（SkillInfo JSON 列表）。
+  rpc ListSkills(Empty) returns (SkillsResponse);
+  // SetSkillActive 启用/禁用指定技能。
+  rpc SetSkillActive(SetSkillActiveRequest) returns (Empty);
+  // DeleteSkill 删除指定技能。
+  rpc DeleteSkill(DeleteSkillRequest) returns (Empty);
+
+  // ── 平台消息历史（宿主 db platform_message_history 表 → 插件可读可改）──
+  // GetPlatformMessageHistory 按平台/用户取最近 n 条消息记录。
+  rpc GetPlatformMessageHistory(GetPMHistoryRequest) returns (PMHistoryRecordsResponse);
+  // InsertPlatformMessageHistory 插入一条平台消息记录。
+  rpc InsertPlatformMessageHistory(InsertPMHistoryRequest) returns (PMHistoryRecordResponse);
+  // UpdatePlatformMessageHistory 更新一条记录（content / llm_checkpoint_id）。
+  rpc UpdatePlatformMessageHistory(UpdatePMHistoryRequest) returns (Empty);
+  // DeletePlatformMessageHistory 按 ID 删除一条记录。
+  rpc DeletePlatformMessageHistory(DeletePMHistoryRequest) returns (Empty);
 }
 
 
@@ -905,4 +923,72 @@ message FeedSessionWaitResponse {
 
 message GetConfigSchemaResponse {
   bytes schema_json = 1; // JSON schema (FlatSchema format: {"type":..., "properties":{...}} or raw)
+}
+
+// ── 技能（Skills）──
+// 宿主 internal/skills 的 SkillInfo 序列化（字段名与 Python SDK
+// skills/SkillInfo + 宿主 go ListSkillsInfo 对齐）。
+message SkillsResponse {
+  repeated bytes skills_json = 1; // 每条为 SkillInfo JSON（name/description/path/active/...）
+}
+
+message SetSkillActiveRequest {
+  // 技能名（目录段安全校验由宿主执行）。
+  string name = 1;
+  bool active = 2;
+}
+
+message DeleteSkillRequest {
+  string name = 1;
+}
+
+// ── 平台消息历史 ──
+// 与宿主 db platform_message_history 表 + Python SDK
+// PlatformMessageHistoryManager 字段对齐。
+message PMHistoryRecord {
+  int64 id = 1;
+  string platform_id = 2;
+  string user_id = 3;
+  string sender_id = 4;
+  bytes content_json = 5;
+  string llm_checkpoint_id = 6;
+  string created_at = 7; // RFC3339 / ISO 串
+}
+
+message GetPMHistoryRequest {
+  // 平台实例 ID（空 = 全部）。
+  string platform_id = 1;
+  // 用户 ID / unified message origin（空 = 全部）。
+  string user_id = 2;
+  // 返回最近 limit 条（<=0 = 宿主默认 200）。
+  int32 limit = 3;
+}
+
+message PMHistoryRecordsResponse {
+  repeated bytes records_json = 1; // 每条为 PMHistoryRecord JSON
+}
+
+message InsertPMHistoryRequest {
+  string platform_id = 1;
+  string user_id = 2;
+  string sender_id = 3;
+  bytes content_json = 4;
+  string llm_checkpoint_id = 5;
+  // max_messages：该 (platform_id,user_id) 键保留的最大条数
+  //（>0 时宿主自动裁剪最旧记录；=0 / 省略按宿主默认）。
+  int32 max_messages = 6;
+}
+
+message PMHistoryRecordResponse {
+  bytes record_json = 1; // 插入后的完整记录 JSON
+}
+
+message UpdatePMHistoryRequest {
+  int64 id = 1;
+  bytes content_json = 2;
+  string llm_checkpoint_id = 3;
+}
+
+message DeletePMHistoryRequest {
+  int64 id = 1;
 }

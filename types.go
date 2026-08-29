@@ -1,6 +1,8 @@
 package sdk
 
 import (
+	"encoding/json"
+	"fmt"
 	"sync"
 
 	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
@@ -328,4 +330,134 @@ func (p *Plugin) unifiedMsgOriginOf(e *Event) string {
 		return ""
 	}
 	return platform + ":" + msgType + ":" + conv
+}
+
+// ── 技能（Skills，对齐 Python SDK astrbot.core.skills.SkillInfo 字段）──
+
+// SkillSourceType 描述技能的来源（local_only / plugin / sandbox_only /
+// workspace / both），与宿主 internal/skills 的 SourceType 及 Python SDK
+// skill_manager 的 source_type 一致。
+type SkillSourceType string
+
+const (
+	SkillSourceLocalOnly   SkillSourceType = "local_only"
+	SkillSourcePlugin      SkillSourceType = "plugin"
+	SkillSourceSandboxOnly SkillSourceType = "sandbox_only"
+	SkillSourceWorkspace   SkillSourceType = "workspace"
+	SkillSourceBoth        SkillSourceType = "both"
+)
+
+// SkillInfo 描述宿主技能管理器中的一个技能。字段名与 host
+// internal/skills.SkillInfo 的 JSON 及 Python SDK SkillInfo 完全对齐，
+// 供插件读取 ListSkills 结果 / 构造 SetSkillActive、DeleteSkill 入参。
+type SkillInfo struct {
+	Name          string          `json:"name"`
+	Description   string          `json:"description"`
+	Path          string          `json:"path"`
+	Active        bool            `json:"active"`
+	SourceType    SkillSourceType `json:"source_type"`
+	SourceLabel   string          `json:"source_label"`
+	LocalExists   bool            `json:"local_exists"`
+	SandboxExists bool            `json:"sandbox_exists"`
+	PluginName    string          `json:"plugin_name"`
+	Readonly      bool            `json:"readonly"`
+	Preset        bool            `json:"preset"`
+}
+
+// FromMap 从宿主返回的 SkillInfo JSON map 还原强类型结构（对齐 Python SDK
+// SkillInfo.from_dict）。未知/缺失字段安全取零值。
+func (s *SkillInfo) FromMap(m map[string]any) {
+	if s == nil || m == nil {
+		return
+	}
+	s.Name = strAny(m["name"])
+	s.Description = strAny(m["description"])
+	s.Path = strAny(m["path"])
+	s.Active = boolAny(m["active"])
+	s.SourceType = SkillSourceType(strAnyDefault(m["source_type"], "local_only"))
+	s.SourceLabel = strAnyDefault(m["source_label"], "local")
+	s.LocalExists = boolDefault(m["local_exists"], true)
+	s.SandboxExists = boolAny(m["sandbox_exists"])
+	s.PluginName = strAny(m["plugin_name"])
+	s.Readonly = boolAny(m["readonly"])
+	s.Preset = boolAny(m["preset"])
+}
+
+// ── 平台消息历史（对齐 Python SDK PlatformMessageHistoryManager / 宿主 db
+// platform_message_history 表字段）──
+
+// PMHistoryRecord 描述宿主 db 中一条平台消息历史记录。
+type PMHistoryRecord struct {
+	ID              int64  `json:"id"`
+	PlatformID      string `json:"platform_id"`
+	UserID          string `json:"user_id"`
+	SenderID        string `json:"sender_id"`
+	Content         any    `json:"content"`
+	LLMCheckpointID string `json:"llm_checkpoint_id"`
+	CreatedAt       string `json:"created_at"`
+}
+
+// FromMap 从宿主返回的 PMHistoryRecord JSON map 还原强类型结构。
+func (r *PMHistoryRecord) FromMap(m map[string]any) {
+	if r == nil || m == nil {
+		return
+	}
+	r.ID = int64Any(m["id"])
+	r.PlatformID = strAny(m["platform_id"])
+	r.UserID = strAny(m["user_id"])
+	r.SenderID = strAny(m["sender_id"])
+	r.Content = m["content"]
+	r.LLMCheckpointID = strAny(m["llm_checkpoint_id"])
+	r.CreatedAt = strAny(m["created_at"])
+}
+
+// ── map→强类型 helper（安全取字段，缺省零值，兼容 Python SDK 容错语义）──
+
+func strAny(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func strAnyDefault(v any, def string) string {
+	if s, ok := v.(string); ok && s != "" {
+		return s
+	}
+	return def
+}
+
+func boolAny(v any) bool {
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	return false
+}
+
+func boolDefault(v any, def bool) bool {
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	return def
+}
+
+func int64Any(v any) int64 {
+	switch n := v.(type) {
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case float64:
+		return int64(n)
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return i
+		}
+	case string:
+		var i int64
+		if _, err := fmt.Sscanf(n, "%d", &i); err == nil {
+			return i
+		}
+	}
+	return 0
 }
