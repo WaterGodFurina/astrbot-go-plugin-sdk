@@ -411,6 +411,212 @@ func (r *PMHistoryRecord) FromMap(m map[string]any) {
 	r.CreatedAt = strAny(m["created_at"])
 }
 
+// ── 知识库（对齐宿主 internal/knowledgebase 与 Python 本体 kb_mgr 返回结构）──
+
+// KBInfo 描述宿主的一个知识库元数据（对齐 Python 本体 KnowledgeBase 的
+// snake_case JSON 字段），供插件读取 KBListKBs 结果。
+type KBInfo struct {
+	KBID                string `json:"kb_id"`
+	KBName              string `json:"kb_name"`
+	Description         string `json:"description"`
+	Emoji               string `json:"emoji"`
+	EmbeddingProviderID string `json:"embedding_provider_id"`
+	RerankProviderID    string `json:"rerank_provider_id"`
+	ChunkSize           int    `json:"chunk_size"`
+	ChunkOverlap        int    `json:"chunk_overlap"`
+	TopKDense           int    `json:"top_k_dense"`
+	TopKSparse          int    `json:"top_k_sparse"`
+	TopMFinal           int    `json:"top_m_final"`
+	CreatedAt           string `json:"created_at"`
+	UpdatedAt           string `json:"updated_at"`
+}
+
+// FromMap 从宿主返回的知识库 JSON map 还原强类型结构。未知/缺失字段安全取零值。
+func (k *KBInfo) FromMap(m map[string]any) {
+	if k == nil || m == nil {
+		return
+	}
+	k.KBID = strAny(m["kb_id"])
+	k.KBName = strAny(m["kb_name"])
+	k.Description = strAny(m["description"])
+	k.Emoji = strAny(m["emoji"])
+	k.EmbeddingProviderID = strAny(m["embedding_provider_id"])
+	k.RerankProviderID = strAny(m["rerank_provider_id"])
+	k.ChunkSize = int(int64Any(m["chunk_size"]))
+	k.ChunkOverlap = int(int64Any(m["chunk_overlap"]))
+	k.TopKDense = int(int64Any(m["top_k_dense"]))
+	k.TopKSparse = int(int64Any(m["top_k_sparse"]))
+	k.TopMFinal = int(int64Any(m["top_m_final"]))
+	k.CreatedAt = strAny(m["created_at"])
+	k.UpdatedAt = strAny(m["updated_at"])
+}
+
+// KBSearchResult 是 KBRetrieve 的一条检索命中（字段名对齐 Python 本体
+// kb_mgr.retrieve 返回的 results dict：chunk_id/doc_id/kb_id/kb_name/
+// doc_name/chunk_index/content/score/char_count）。
+type KBSearchResult struct {
+	ChunkID    string  `json:"chunk_id"`
+	DocID      string  `json:"doc_id"`
+	KBID       string  `json:"kb_id"`
+	KBName     string  `json:"kb_name"`
+	DocName    string  `json:"doc_name"`
+	ChunkIndex int     `json:"chunk_index"`
+	Content    string  `json:"content"`
+	Score      float64 `json:"score"`
+	CharCount  int     `json:"char_count"`
+}
+
+// FromMap 从宿主返回的检索结果 JSON map 还原强类型结构。
+func (r *KBSearchResult) FromMap(m map[string]any) {
+	if r == nil || m == nil {
+		return
+	}
+	r.ChunkID = strAny(m["chunk_id"])
+	r.DocID = strAny(m["doc_id"])
+	r.KBID = strAny(m["kb_id"])
+	r.KBName = strAny(m["kb_name"])
+	r.DocName = strAny(m["doc_name"])
+	r.ChunkIndex = int(int64Any(m["chunk_index"]))
+	r.Content = strAny(m["content"])
+	r.Score = float64Any(m["score"])
+	r.CharCount = int(int64Any(m["char_count"]))
+}
+
+// ParseKBSearchResults 把宿主 KBRetrieve 返回的 results_json（JSON 数组）
+// 解析为强类型切片；解析失败/空串返回空切片（容错，不报错）。
+func ParseKBSearchResults(resultsJSON string) []KBSearchResult {
+	var raws []map[string]any
+	if err := json.Unmarshal([]byte(resultsJSON), &raws); err != nil {
+		return nil
+	}
+	out := make([]KBSearchResult, 0, len(raws))
+	for _, m := range raws {
+		var r KBSearchResult
+		r.FromMap(m)
+		out = append(out, r)
+	}
+	return out
+}
+
+// ── 插件定时任务（对齐宿主 internal/cron SerializeJob / Python 本体
+// serialize_job 快照字段）──
+
+// CronJobInfo 描述宿主侧一个定时任务快照。
+type CronJobInfo struct {
+	ID             string         `json:"id"`
+	Name           string         `json:"name"`
+	Description    string         `json:"description"`
+	JobType        string         `json:"job_type"`
+	CronExpression string         `json:"cron_expression"`
+	Timezone       string         `json:"timezone"`
+	Payload        map[string]any `json:"payload"`
+	Enabled        bool           `json:"enabled"`
+	Persistent     bool           `json:"persistent"`
+	RunOnce        bool           `json:"run_once"`
+	Note           string         `json:"note"`
+	RunAt          string         `json:"run_at"`
+	NextRunTime    string         `json:"next_run_time"`
+}
+
+// FromMap 从宿主返回的 Job 快照 JSON map 还原强类型结构（id/job_id 双键
+// 兼容）。
+func (j *CronJobInfo) FromMap(m map[string]any) {
+	if j == nil || m == nil {
+		return
+	}
+	j.ID = strAny(m["id"])
+	if j.ID == "" {
+		j.ID = strAny(m["job_id"])
+	}
+	j.Name = strAny(m["name"])
+	j.Description = strAny(m["description"])
+	j.JobType = strAny(m["job_type"])
+	j.CronExpression = strAny(m["cron_expression"])
+	j.Timezone = strAny(m["timezone"])
+	if p, ok := m["payload"].(map[string]any); ok {
+		j.Payload = p
+	}
+	j.Enabled = boolAny(m["enabled"])
+	j.Persistent = boolAny(m["persistent"])
+	j.RunOnce = boolAny(m["run_once"])
+	j.Note = strAny(m["note"])
+	j.RunAt = strAny(m["run_at"])
+	j.NextRunTime = strAny(m["next_run_time"])
+}
+
+// CronCreateSpec 是 CronCreate 反调用携带的任务定义（proto CronCreateRequest
+// 的解包视图；RunAt 为 RFC3339 字符串，可空）。
+type CronCreateSpec struct {
+	Name           string
+	JobType        string
+	CronExpression string
+	Timezone       string
+	Payload        map[string]any
+	Description    string
+	Enabled        bool
+	RunOnce        bool
+	RunAt          string
+	// PluginName 是调用方插件身份（SDK 侧从连接身份 s.identity() 注入，
+	// 对齐 RegisterSessionWait 的 pluginName 注入模式）：宿主据此在 payload
+	// 里打 _plugin_id 路由键，cron 到点触发时按其定位插件实例回推
+	// FeedCronJob。插件侧客户端直连构造的 spec 不填（宿主不注入）。
+	PluginName string
+}
+
+// ── 宿主 MCP 读写桥接（对齐 proto McpToolsResponse 每项
+// {server, name, description, schema_json}）──
+
+// MCPToolInfo 描述宿主某 MCP server 上的一个工具。
+type MCPToolInfo struct {
+	Server      string `json:"server"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	// InputSchema 是工具入参 JSON Schema 对象（宿主 schema_json 字符串解析所得）。
+	InputSchema map[string]any `json:"input_schema,omitempty"`
+}
+
+// FromMap 从宿主返回的工具 JSON map 还原强类型结构（schema_json 为 JSON
+// 字符串，解析失败时 InputSchema 为 nil）。
+func (t *MCPToolInfo) FromMap(m map[string]any) {
+	if t == nil || m == nil {
+		return
+	}
+	t.Server = strAny(m["server"])
+	t.Name = strAny(m["name"])
+	t.Description = strAny(m["description"])
+	if raw := strAny(m["schema_json"]); raw != "" {
+		var schema map[string]any
+		if json.Unmarshal([]byte(raw), &schema) == nil {
+			t.InputSchema = schema
+		}
+	}
+}
+
+// MCPToolCallResult 是 McpCallTool 的完整结果（对齐宿主 MCPToolCallResult：
+// content 为结构化内容块数组，isError 标记宿主侧调用是否出错）。
+type MCPToolCallResult struct {
+	Content []map[string]any `json:"content"`
+	IsError bool             `json:"isError"`
+	// Text 是宿主侧提取的纯文本摘要（旧宿主可能只填 result_json 无此字段）。
+	Text string `json:"text,omitempty"`
+}
+
+// FromMap 从结果 JSON map 还原强类型结构。
+func (r *MCPToolCallResult) FromMap(m map[string]any) {
+	if r == nil || m == nil {
+		return
+	}
+	if content, ok := m["content"].([]any); ok {
+		for _, block := range content {
+			if bm, ok := block.(map[string]any); ok {
+				r.Content = append(r.Content, bm)
+			}
+		}
+	}
+	r.IsError = boolAny(m["isError"]) || boolAny(m["is_error"])
+	r.Text = strAny(m["text"])
+}
+
 // ── map→强类型 helper（安全取字段，缺省零值，兼容 Python SDK 容错语义）──
 
 func strAny(v any) string {
@@ -457,6 +663,29 @@ func int64Any(v any) int64 {
 		var i int64
 		if _, err := fmt.Sscanf(n, "%d", &i); err == nil {
 			return i
+		}
+	}
+	return 0
+}
+
+func float64Any(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case json.Number:
+		if f, err := n.Float64(); err == nil {
+			return f
+		}
+	case string:
+		var f float64
+		if _, err := fmt.Sscanf(n, "%g", &f); err == nil {
+			return f
 		}
 	}
 	return 0

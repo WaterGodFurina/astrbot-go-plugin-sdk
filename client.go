@@ -299,6 +299,17 @@ func (c *Client) FeedSessionWait(ctx context.Context, se *sdkv1.SDKEvent) (bool,
 	return resp.GetHandled(), nil
 }
 
+// FeedCronJob pushes a cron trigger to the plugin so the handler of a basic
+// job registered via CronCreate (payload tagged with _plugin_id) runs in the
+// plugin process. Returns handled=false when the plugin has no matching
+// handler. Old plugin binaries return UNIMPLEMENTED; the caller should treat
+// that as handled=false (job fired without a plugin handler).
+func (c *Client) FeedCronJob(ctx context.Context, req *sdkv1.FeedCronJobRequest) (*sdkv1.FeedCronJobResponse, error) {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
+	return c.svc.FeedCronJob(ctx, req, rpcCallOpts...)
+}
+
 // Close releases the underlying gRPC connection and stops the HostService
 // server this client served on the broker (if any). Call it after the plugin
 // process has been killed so reloads do not leak connections/goroutines.

@@ -635,6 +635,303 @@ func (h *host) DeletePlatformMessageHistory(id int64) error {
 	return err
 }
 
+// ListSkillsV2 带过滤参数的技能列表：activeOnly 仅返回启用技能；runtime
+// 过滤运行时视图（"local"/"sandbox"/""=全部）；showSandboxPath 返回 sandbox
+// 路径而非宿主本地路径（强类型 SkillInfo）。
+func (h *host) ListSkillsV2(activeOnly bool, runtime string, showSandboxPath bool) ([]SkillInfo, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.ListSkillsV2(ctx, &sdkv1.ListSkillsV2Request{
+		ActiveOnly:      activeOnly,
+		Runtime:         runtime,
+		ShowSandboxPath: showSandboxPath,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SkillInfo, 0, len(resp.SkillsJson))
+	for _, raw := range resp.SkillsJson {
+		var m map[string]any
+		if json.Unmarshal(raw, &m) == nil {
+			var s SkillInfo
+			s.FromMap(m)
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+// KBRetrieve 检索宿主知识库：返回拼接后的上下文文本与结果 JSON 数组
+//（无命中时 context_text 为空、results_json 为 "[]"）。可经
+// ParseKBSearchResults 解析为强类型切片。kbNames 为空 = 宿主全部知识库。
+func (h *host) KBRetrieve(query string, kbNames []string, topKFusion, topMFinal int) (string, string, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return "", "", err
+	}
+	// 检索含嵌入 API 调用，属长操作，用 LLM 级超时。
+	ctx, cancel := hostLLMRPCCtx()
+	defer cancel()
+	resp, err := svc.KBRetrieve(ctx, &sdkv1.KBRetrieveRequest{
+		Query:      query,
+		KbNames:    kbNames,
+		TopKFusion: int32(topKFusion),
+		TopMFinal:  int32(topMFinal),
+	})
+	if err != nil {
+		return "", "", err
+	}
+	results := resp.GetResultsJson()
+	if results == "" {
+		results = "[]"
+	}
+	return resp.GetContextText(), results, nil
+}
+
+// KBUploadFromURL 让宿主从 URL 拉取文档写入指定知识库并分块
+//（chunkSize/chunkOverlap <=0 用宿主默认；kbNameOrID 为知识库名或 ID）。
+func (h *host) KBUploadFromURL(kbNameOrID, url string, chunkSize, chunkOverlap int) error {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return err
+	}
+	// 下载 + 分块 + 逐块嵌入是长操作，用 LLM 级超时。
+	ctx, cancel := hostLLMRPCCtx()
+	defer cancel()
+	_, err = svc.KBUploadFromURL(ctx, &sdkv1.KBUploadFromURLRequest{
+		KbId:         kbNameOrID,
+		Url:          url,
+		ChunkSize:    int32(chunkSize),
+		ChunkOverlap: int32(chunkOverlap),
+	})
+	return err
+}
+
+// KBListKBs 返回宿主全部知识库元数据（强类型 KBInfo）。
+func (h *host) KBListKBs() ([]KBInfo, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.KBListKBs(ctx, &sdkv1.Empty{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]KBInfo, 0, len(resp.KbsJson))
+	for _, raw := range resp.KbsJson {
+		var m map[string]any
+		if json.Unmarshal(raw, &m) == nil {
+			var k KBInfo
+			k.FromMap(m)
+			out = append(out, k)
+		}
+	}
+	return out, nil
+}
+
+// RegisterFileToken 把宿主侧文件路径登记为随机不可枚举的令牌（timeoutSec
+// <=0 用宿主默认 TTL），下游凭 token 经宿主公开文件路由（/api/file/{token}）
+// 读取文件，避免暴露真实路径。
+func (h *host) RegisterFileToken(path string, timeoutSec int32) (string, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.RegisterFileToken(ctx, &sdkv1.RegisterFileTokenRequest{
+		Path:       path,
+		TimeoutSec: timeoutSec,
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.GetToken(), nil
+}
+
+// CronCreate 创建定时任务，返回宿主 Job 快照（强类型 CronJobInfo）。
+func (h *host) CronCreate(spec CronCreateSpec) (CronJobInfo, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return CronJobInfo{}, err
+	}
+	var payloadJSON []byte
+	if spec.Payload != nil {
+		payloadJSON, err = json.Marshal(spec.Payload)
+		if err != nil {
+			return CronJobInfo{}, err
+		}
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.CronCreate(ctx, &sdkv1.CronCreateRequest{
+		Name:           spec.Name,
+		JobType:        spec.JobType,
+		CronExpression: spec.CronExpression,
+		Timezone:       spec.Timezone,
+		PayloadJson:    payloadJSON,
+		Description:    spec.Description,
+		Enabled:        spec.Enabled,
+		RunOnce:        spec.RunOnce,
+		RunAt:          spec.RunAt,
+	})
+	if err != nil {
+		return CronJobInfo{}, err
+	}
+	return cronJobInfoFromJSON(resp.GetJobJson())
+}
+
+// CronUpdate 按 jobID 更新任务字段（fields 仅含需更新的键），返回更新后的
+// Job 快照（强类型 CronJobInfo）。
+func (h *host) CronUpdate(jobID string, fields map[string]any) (CronJobInfo, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return CronJobInfo{}, err
+	}
+	fieldsJSON, err := json.Marshal(fields)
+	if err != nil {
+		return CronJobInfo{}, err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.CronUpdate(ctx, &sdkv1.CronUpdateRequest{
+		JobId:      jobID,
+		FieldsJson: fieldsJSON,
+	})
+	if err != nil {
+		return CronJobInfo{}, err
+	}
+	return cronJobInfoFromJSON(resp.GetJobJson())
+}
+
+// CronDelete 删除指定定时任务。
+func (h *host) CronDelete(jobID string) error {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	_, err = svc.CronDelete(ctx, &sdkv1.CronDeleteRequest{JobId: jobID})
+	return err
+}
+
+// CronList 列出定时任务（jobType 空 = 全部类型，强类型 CronJobInfo）。
+func (h *host) CronList(jobType string) ([]CronJobInfo, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.CronList(ctx, &sdkv1.CronListRequest{JobType: jobType})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]CronJobInfo, 0, len(resp.JobsJson))
+	for _, raw := range resp.JobsJson {
+		info, err := cronJobInfoFromJSON(raw)
+		if err != nil {
+			continue
+		}
+		out = append(out, info)
+	}
+	return out, nil
+}
+
+// CronRunNow 立即触发一次指定任务。
+func (h *host) CronRunNow(jobID string) error {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	_, err = svc.CronRunNow(ctx, &sdkv1.CronRunNowRequest{JobId: jobID})
+	return err
+}
+
+// McpListTools 汇总宿主已连接 MCP server 的全部工具（强类型 MCPToolInfo）。
+func (h *host) McpListTools() ([]MCPToolInfo, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := hostRPCCtx()
+	defer cancel()
+	resp, err := svc.McpListTools(ctx, &sdkv1.Empty{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]MCPToolInfo, 0, len(resp.ToolsJson))
+	for _, raw := range resp.ToolsJson {
+		var m map[string]any
+		if json.Unmarshal(raw, &m) == nil {
+			var t MCPToolInfo
+			t.FromMap(m)
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
+// McpCallTool 调用宿主侧 MCP 工具（server + toolName + args），返回完整
+// 结果（content/isError，含宿主提取的纯文本摘要）。
+func (h *host) McpCallTool(server, toolName string, args map[string]any) (*MCPToolCallResult, error) {
+	svc, err := hostServiceClient()
+	if err != nil {
+		return nil, err
+	}
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		return nil, err
+	}
+	// MCP 工具可能执行慢操作（网页抓取/子进程等），用 LLM 级超时。
+	ctx, cancel := hostLLMRPCCtx()
+	defer cancel()
+	resp, err := svc.McpCallTool(ctx, &sdkv1.McpCallToolRequest{
+		Server:        server,
+		ToolName:      toolName,
+		ArgumentsJson: argsJSON,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var r MCPToolCallResult
+	if len(resp.GetResultJson()) > 0 {
+		var m map[string]any
+		if json.Unmarshal(resp.GetResultJson(), &m) == nil {
+			r.FromMap(m)
+		}
+	}
+	// result_json 缺失/解析失败时回退到 proto 顶层字段。
+	if len(r.Content) == 0 && r.Text == "" {
+		r.IsError = r.IsError || resp.GetIsError()
+		r.Text = resp.GetText()
+	}
+	return &r, nil
+}
+
+// cronJobInfoFromJSON 把宿主 Job 快照 JSON 解析为强类型 CronJobInfo。
+func cronJobInfoFromJSON(raw []byte) (CronJobInfo, error) {
+	var info CronJobInfo
+	if len(raw) == 0 {
+		return info, nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return info, err
+	}
+	info.FromMap(m)
+	return info, nil
+}
+
 // ---------------------------------------------------------------------------
 // Host side: serving the HostService over the broker.
 // ---------------------------------------------------------------------------
@@ -766,6 +1063,55 @@ type HostServiceHooks struct {
 	UpdatePlatformMessageHistory func(id int64, content any, llmCheckpointID string) error
 	// DeletePlatformMessageHistory 按 ID 删除一条记录。
 	DeletePlatformMessageHistory func(id int64) error
+
+	// ── 技能视图扩展（sandbox runtime 视图）──
+	// ListSkillsV2 带过滤参数的技能列表：activeOnly 仅返回启用技能；runtime
+	// 过滤运行时视图（"local"/"sandbox"/""=全部）；showSandboxPath 返回
+	// sandbox 路径而非宿主本地路径。
+	ListSkillsV2 func(activeOnly bool, runtime string, showSandboxPath bool) []map[string]any
+
+	// ── 知识库（宿主 internal/knowledgebase）──
+	// KBRetrieve 检索知识库：kbNames 为空 = 宿主全部知识库；topKFusion 为
+	// 融合召回数、topMFinal 为最终保留条数（<=0 用宿主默认）。返回拼接后的
+	// 上下文文本与检索结果 JSON 数组（无命中时 context_text 为空、
+	// results_json 为 "[]"）。
+	KBRetrieve func(query string, kbNames []string, topKFusion, topMFinal int) (contextText string, resultsJSON string, err error)
+	// KBUploadFromURL 让宿主从 URL 拉取文档写入指定知识库并分块
+	//（chunkSize/chunkOverlap <=0 用宿主默认；kbNameOrID 为知识库名或 ID）。
+	KBUploadFromURL func(kbNameOrID, url string, chunkSize, chunkOverlap int) error
+	// KBListKBs 返回宿主全部知识库元数据（每项为 KnowledgeBase 结构的
+	// snake_case map：kb_id/kb_name/description/...）。
+	KBListKBs func() []map[string]any
+
+	// ── 文件令牌（file_token 文件服务）──
+	// RegisterFileToken 把宿主侧文件路径登记为随机不可枚举的令牌
+	//（timeoutSec <=0 用宿主默认 TTL），下游凭 token 经宿主公开文件路由
+	// 读取，避免暴露真实路径。
+	RegisterFileToken func(path string, timeoutSec int32) (string, error)
+
+	// ── 插件定时任务（宿主 internal/cron）──
+	// CronCreate 创建定时任务，返回宿主 Job 快照 map（job_id/name/...）。
+	CronCreate func(spec *CronCreateSpec) (map[string]any, error)
+	// CronUpdate 按 jobID 更新任务字段（fields 仅含需更新的键：
+	// name/cron_expression/timezone/payload/description/enabled），返回更新
+	// 后的 Job 快照。
+	CronUpdate func(jobID string, fields map[string]any) (map[string]any, error)
+	// CronDelete 删除指定定时任务。
+	CronDelete func(jobID string) error
+	// CronList 列出定时任务（jobType 空 = 全部类型）。
+	CronList func(jobType string) []map[string]any
+	// CronRunNow 立即触发一次指定任务。
+	CronRunNow func(jobID string) error
+
+	// ── 宿主 MCP 读写桥接（只读列出 + 调用宿主侧 MCP 工具；插件自管 MCP
+	// 不经此通道）──
+	// McpListTools 汇总宿主已连接 MCP server 的全部工具（每项含
+	// server/name/description/schema_json）。
+	McpListTools func() []map[string]any
+	// McpCallTool 调用宿主侧 MCP 工具：result 为完整结果对象
+	//（{"content": [...], "isError": bool}），text 为纯文本摘要，isError
+	// 标记宿主侧调用是否出错。
+	McpCallTool func(server, toolName string, args map[string]any) (result map[string]any, text string, isError bool, err error)
 }
 
 var (
@@ -1936,6 +2282,260 @@ func (s *hostServiceServer) DeletePlatformMessageHistory(_ context.Context, req 
 		return nil, err
 	}
 	return &sdkv1.Empty{}, nil
+}
+
+// ListSkillsV2 带过滤参数的技能列表（active_only/runtime/show_sandbox_path）。
+func (s *hostServiceServer) ListSkillsV2(_ context.Context, req *sdkv1.ListSkillsV2Request) (*sdkv1.SkillsResponse, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.ListSkillsV2 == nil {
+		return nil, status.Error(codes.Unimplemented, "host hook ListSkillsV2 not configured")
+	}
+	resp := &sdkv1.SkillsResponse{}
+	for _, x := range h.ListSkillsV2(req.GetActiveOnly(), req.GetRuntime(), req.GetShowSandboxPath()) {
+		out, err := json.Marshal(x)
+		if err != nil {
+			return nil, err
+		}
+		resp.SkillsJson = append(resp.SkillsJson, out)
+	}
+	return resp, nil
+}
+
+// KBRetrieve 检索宿主知识库，返回拼接上下文文本与结果 JSON 数组。
+func (s *hostServiceServer) KBRetrieve(_ context.Context, req *sdkv1.KBRetrieveRequest) (*sdkv1.KBRetrieveResponse, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.KBRetrieve == nil {
+		return nil, status.Error(codes.Unimplemented, "host hook KBRetrieve not configured")
+	}
+	contextText, resultsJSON, err := h.KBRetrieve(req.GetQuery(), req.GetKbNames(), int(req.GetTopKFusion()), int(req.GetTopMFinal()))
+	if err != nil {
+		return nil, err
+	}
+	if resultsJSON == "" {
+		resultsJSON = "[]"
+	}
+	return &sdkv1.KBRetrieveResponse{ContextText: contextText, ResultsJson: resultsJSON}, nil
+}
+
+// KBUploadFromURL 让宿主从 URL 拉取文档写入指定知识库并分块。
+func (s *hostServiceServer) KBUploadFromURL(_ context.Context, req *sdkv1.KBUploadFromURLRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.KBUploadFromURL == nil {
+		return nil, status.Error(codes.Unimplemented, "host hook KBUploadFromURL not configured")
+	}
+	if err := h.KBUploadFromURL(req.GetKbId(), req.GetUrl(), int(req.GetChunkSize()), int(req.GetChunkOverlap())); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
+}
+
+// KBListKBs 列出宿主全部知识库元数据（每项 KnowledgeBase 结构 JSON）。
+func (s *hostServiceServer) KBListKBs(_ context.Context, _ *sdkv1.Empty) (*sdkv1.KBListResponse, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.KBListKBs == nil {
+		return nil, status.Error(codes.Unimplemented, "host hook KBListKBs not configured")
+	}
+	resp := &sdkv1.KBListResponse{}
+	for _, k := range h.KBListKBs() {
+		out, err := json.Marshal(k)
+		if err != nil {
+			return nil, err
+		}
+		resp.KbsJson = append(resp.KbsJson, out)
+	}
+	return resp, nil
+}
+
+// RegisterFileToken 把宿主侧文件路径登记为随机不可枚举令牌。
+func (s *hostServiceServer) RegisterFileToken(_ context.Context, req *sdkv1.RegisterFileTokenRequest) (*sdkv1.RegisterFileTokenResponse, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.RegisterFileToken == nil {
+		return nil, status.Error(codes.Unimplemented, "host hook RegisterFileToken not configured")
+	}
+	token, err := h.RegisterFileToken(req.GetPath(), req.GetTimeoutSec())
+	if err != nil {
+		return nil, err
+	}
+	return &sdkv1.RegisterFileTokenResponse{Token: token}, nil
+}
+
+// CronCreate 创建定时任务，返回宿主 Job 快照 JSON。
+func (s *hostServiceServer) CronCreate(_ context.Context, req *sdkv1.CronCreateRequest) (*sdkv1.CronJobResponse, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.CronCreate == nil {
+		return nil, status.Error(codes.Unimplemented, "host hook CronCreate not configured")
+	}
+	var payload map[string]any
+	if len(req.GetPayloadJson()) > 0 {
+		if err := json.Unmarshal(req.GetPayloadJson(), &payload); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "payload_json decode failed: %v", err)
+		}
+	}
+	job, err := h.CronCreate(&CronCreateSpec{
+		Name:           req.GetName(),
+		JobType:        req.GetJobType(),
+		CronExpression: req.GetCronExpression(),
+		Timezone:       req.GetTimezone(),
+		Payload:        payload,
+		Description:    req.GetDescription(),
+		Enabled:        req.GetEnabled(),
+		RunOnce:        req.GetRunOnce(),
+		RunAt:          req.GetRunAt(),
+		// 调用方身份注入：宿主在 payload 打 _plugin_id 路由键，cron 到点
+		// 触发时按其定位插件实例回推 FeedCronJob（对齐 RegisterSessionWait
+		// 的 s.identity() 注入模式）。
+		PluginName: s.identity(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	out, err := json.Marshal(job)
+	if err != nil {
+		return nil, err
+	}
+	return &sdkv1.CronJobResponse{JobJson: out}, nil
+}
+
+// CronUpdate 按 job_id 更新任务字段（fields_json 部分更新语义）。
+func (s *hostServiceServer) CronUpdate(_ context.Context, req *sdkv1.CronUpdateRequest) (*sdkv1.CronJobResponse, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.CronUpdate == nil {
+		return nil, status.Error(codes.Unimplemented, "host hook CronUpdate not configured")
+	}
+	fields := map[string]any{}
+	if len(req.GetFieldsJson()) > 0 {
+		if err := json.Unmarshal(req.GetFieldsJson(), &fields); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "fields_json decode failed: %v", err)
+		}
+	}
+	job, err := h.CronUpdate(req.GetJobId(), fields)
+	if err != nil {
+		return nil, err
+	}
+	out, err := json.Marshal(job)
+	if err != nil {
+		return nil, err
+	}
+	return &sdkv1.CronJobResponse{JobJson: out}, nil
+}
+
+// CronDelete 删除指定定时任务。
+func (s *hostServiceServer) CronDelete(_ context.Context, req *sdkv1.CronDeleteRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.CronDelete == nil {
+		return nil, status.Error(codes.Unimplemented, "host hook CronDelete not configured")
+	}
+	if err := h.CronDelete(req.GetJobId()); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
+}
+
+// CronList 列出定时任务（job_type 空 = 全部类型）。
+func (s *hostServiceServer) CronList(_ context.Context, req *sdkv1.CronListRequest) (*sdkv1.CronJobsResponse, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.CronList == nil {
+		return nil, status.Error(codes.Unimplemented, "host hook CronList not configured")
+	}
+	resp := &sdkv1.CronJobsResponse{}
+	for _, j := range h.CronList(req.GetJobType()) {
+		out, err := json.Marshal(j)
+		if err != nil {
+			return nil, err
+		}
+		resp.JobsJson = append(resp.JobsJson, out)
+	}
+	return resp, nil
+}
+
+// CronRunNow 立即触发一次指定任务。
+func (s *hostServiceServer) CronRunNow(_ context.Context, req *sdkv1.CronRunNowRequest) (*sdkv1.Empty, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.CronRunNow == nil {
+		return nil, status.Error(codes.Unimplemented, "host hook CronRunNow not configured")
+	}
+	if err := h.CronRunNow(req.GetJobId()); err != nil {
+		return nil, err
+	}
+	return &sdkv1.Empty{}, nil
+}
+
+// McpListTools 汇总宿主已连接 MCP server 的全部工具
+//（每项 {server, name, description, schema_json}）。
+func (s *hostServiceServer) McpListTools(_ context.Context, _ *sdkv1.Empty) (*sdkv1.McpToolsResponse, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.McpListTools == nil {
+		return nil, status.Error(codes.Unimplemented, "host hook McpListTools not configured")
+	}
+	resp := &sdkv1.McpToolsResponse{}
+	for _, t := range h.McpListTools() {
+		out, err := json.Marshal(t)
+		if err != nil {
+			return nil, err
+		}
+		resp.ToolsJson = append(resp.ToolsJson, out)
+	}
+	return resp, nil
+}
+
+// McpCallTool 调用宿主侧 MCP 工具，返回完整结果 JSON / 纯文本摘要 /
+// 是否出错。
+func (s *hostServiceServer) McpCallTool(_ context.Context, req *sdkv1.McpCallToolRequest) (*sdkv1.McpCallToolResponse, error) {
+	if err := s.requireIdentity(); err != nil {
+		return nil, err
+	}
+	h := getHostHooks()
+	if h.McpCallTool == nil {
+		return nil, status.Error(codes.Unimplemented, "host hook McpCallTool not configured")
+	}
+	args := map[string]any{}
+	if len(req.GetArgumentsJson()) > 0 {
+		if err := json.Unmarshal(req.GetArgumentsJson(), &args); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "arguments_json decode failed: %v", err)
+		}
+	}
+	result, text, isError, err := h.McpCallTool(req.GetServer(), req.GetToolName(), args)
+	if err != nil {
+		return nil, err
+	}
+	out, err := json.Marshal(result)
+	if err != nil {
+		return nil, err
+	}
+	return &sdkv1.McpCallToolResponse{ResultJson: out, IsError: isError, Text: text}, nil
 }
 
 // maxChatLLMPerMinute 每插件每分钟 ChatLLM/CallAction 反向调用上限的默认值。

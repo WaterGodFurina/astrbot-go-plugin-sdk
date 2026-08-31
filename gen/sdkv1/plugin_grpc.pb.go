@@ -63,6 +63,7 @@ const (
 	PluginService_FeedSessionWait_FullMethodName  = "/astrbot.sdk.v1.PluginService/FeedSessionWait"
 	PluginService_GetConfigSchema_FullMethodName  = "/astrbot.sdk.v1.PluginService/GetConfigSchema"
 	PluginService_Cleanup_FullMethodName          = "/astrbot.sdk.v1.PluginService/Cleanup"
+	PluginService_FeedCronJob_FullMethodName      = "/astrbot.sdk.v1.PluginService/FeedCronJob"
 )
 
 // PluginServiceClient is the client API for PluginService service.
@@ -123,6 +124,10 @@ type PluginServiceClient interface {
 	GetConfigSchema(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*GetConfigSchemaResponse, error)
 	// Cleanup is called when the host unloads the plugin.
 	Cleanup(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
+	// FeedCronJob 宿主 cron 到点触发插件注册的 basic 任务（经 CronCreate
+	// 注册、payload 带 _plugin_id），插件执行注册的 handler；无匹配 handler
+	// 返回 handled=false（对齐 FeedSessionWait 语义）。
+	FeedCronJob(ctx context.Context, in *FeedCronJobRequest, opts ...grpc.CallOption) (*FeedCronJobResponse, error)
 }
 
 type pluginServiceClient struct {
@@ -273,6 +278,16 @@ func (c *pluginServiceClient) Cleanup(ctx context.Context, in *Empty, opts ...gr
 	return out, nil
 }
 
+func (c *pluginServiceClient) FeedCronJob(ctx context.Context, in *FeedCronJobRequest, opts ...grpc.CallOption) (*FeedCronJobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FeedCronJobResponse)
+	err := c.cc.Invoke(ctx, PluginService_FeedCronJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PluginServiceServer is the server API for PluginService service.
 // All implementations must embed UnimplementedPluginServiceServer
 // for forward compatibility.
@@ -331,6 +346,10 @@ type PluginServiceServer interface {
 	GetConfigSchema(context.Context, *Empty) (*GetConfigSchemaResponse, error)
 	// Cleanup is called when the host unloads the plugin.
 	Cleanup(context.Context, *Empty) (*Empty, error)
+	// FeedCronJob 宿主 cron 到点触发插件注册的 basic 任务（经 CronCreate
+	// 注册、payload 带 _plugin_id），插件执行注册的 handler；无匹配 handler
+	// 返回 handled=false（对齐 FeedSessionWait 语义）。
+	FeedCronJob(context.Context, *FeedCronJobRequest) (*FeedCronJobResponse, error)
 	mustEmbedUnimplementedPluginServiceServer()
 }
 
@@ -382,6 +401,9 @@ func (UnimplementedPluginServiceServer) GetConfigSchema(context.Context, *Empty)
 }
 func (UnimplementedPluginServiceServer) Cleanup(context.Context, *Empty) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Cleanup not implemented")
+}
+func (UnimplementedPluginServiceServer) FeedCronJob(context.Context, *FeedCronJobRequest) (*FeedCronJobResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FeedCronJob not implemented")
 }
 func (UnimplementedPluginServiceServer) mustEmbedUnimplementedPluginServiceServer() {}
 func (UnimplementedPluginServiceServer) testEmbeddedByValue()                       {}
@@ -656,6 +678,24 @@ func _PluginService_Cleanup_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PluginService_FeedCronJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FeedCronJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).FeedCronJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_FeedCronJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).FeedCronJob(ctx, req.(*FeedCronJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PluginService_ServiceDesc is the grpc.ServiceDesc for PluginService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -719,6 +759,10 @@ var PluginService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "Cleanup",
 			Handler:    _PluginService_Cleanup_Handler,
 		},
+		{
+			MethodName: "FeedCronJob",
+			Handler:    _PluginService_FeedCronJob_Handler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "plugin.proto",
@@ -772,6 +816,18 @@ const (
 	HostService_InsertPlatformMessageHistory_FullMethodName = "/astrbot.sdk.v1.HostService/InsertPlatformMessageHistory"
 	HostService_UpdatePlatformMessageHistory_FullMethodName = "/astrbot.sdk.v1.HostService/UpdatePlatformMessageHistory"
 	HostService_DeletePlatformMessageHistory_FullMethodName = "/astrbot.sdk.v1.HostService/DeletePlatformMessageHistory"
+	HostService_KBRetrieve_FullMethodName                   = "/astrbot.sdk.v1.HostService/KBRetrieve"
+	HostService_KBUploadFromURL_FullMethodName              = "/astrbot.sdk.v1.HostService/KBUploadFromURL"
+	HostService_KBListKBs_FullMethodName                    = "/astrbot.sdk.v1.HostService/KBListKBs"
+	HostService_ListSkillsV2_FullMethodName                 = "/astrbot.sdk.v1.HostService/ListSkillsV2"
+	HostService_RegisterFileToken_FullMethodName            = "/astrbot.sdk.v1.HostService/RegisterFileToken"
+	HostService_CronCreate_FullMethodName                   = "/astrbot.sdk.v1.HostService/CronCreate"
+	HostService_CronUpdate_FullMethodName                   = "/astrbot.sdk.v1.HostService/CronUpdate"
+	HostService_CronDelete_FullMethodName                   = "/astrbot.sdk.v1.HostService/CronDelete"
+	HostService_CronList_FullMethodName                     = "/astrbot.sdk.v1.HostService/CronList"
+	HostService_CronRunNow_FullMethodName                   = "/astrbot.sdk.v1.HostService/CronRunNow"
+	HostService_McpListTools_FullMethodName                 = "/astrbot.sdk.v1.HostService/McpListTools"
+	HostService_McpCallTool_FullMethodName                  = "/astrbot.sdk.v1.HostService/McpCallTool"
 )
 
 // HostServiceClient is the client API for HostService service.
@@ -887,6 +943,47 @@ type HostServiceClient interface {
 	UpdatePlatformMessageHistory(ctx context.Context, in *UpdatePMHistoryRequest, opts ...grpc.CallOption) (*Empty, error)
 	// DeletePlatformMessageHistory 按 ID 删除一条记录。
 	DeletePlatformMessageHistory(ctx context.Context, in *DeletePMHistoryRequest, opts ...grpc.CallOption) (*Empty, error)
+	// ── 知识库（对齐宿主 internal/knowledgebase/manager.go）──
+	// KBRetrieve 检索知识库：按 query 做向量/融合检索。kb_names 为空 =
+	// 宿主全部启用中的知识库；top_k_fusion 为融合召回数，top_m_final 为最终
+	// 保留条数（<=0 用宿主默认）。返回拼接后的上下文文本与检索结果 JSON 数组
+	// （空结果时 context_text 为空、results_json 为 "[]"）。
+	KBRetrieve(ctx context.Context, in *KBRetrieveRequest, opts ...grpc.CallOption) (*KBRetrieveResponse, error)
+	// KBUploadFromURL 让宿主从 URL 拉取文档写入指定知识库并分块（chunk_size/
+	// chunk_overlap <=0 用宿主默认）。
+	KBUploadFromURL(ctx context.Context, in *KBUploadFromURLRequest, opts ...grpc.CallOption) (*Empty, error)
+	// KBListKBs 列出宿主全部知识库元数据（每项为 KnowledgeBase 结构 JSON）。
+	KBListKBs(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*KBListResponse, error)
+	// ── 技能视图扩展（sandbox runtime 视图）──
+	// ListSkillsV2 带过滤参数的技能列表：active_only 仅返回启用技能；runtime
+	// 过滤运行时视图（"local"/"sandbox"/""=全部）；show_sandbox_path 返回
+	// sandbox 路径而非宿主本地路径。复用既有 SkillsResponse。
+	ListSkillsV2(ctx context.Context, in *ListSkillsV2Request, opts ...grpc.CallOption) (*SkillsResponse, error)
+	// ── 文件令牌（file_token 文件服务）──
+	// RegisterFileToken 把一个宿主侧文件路径登记为一次性令牌（timeout_sec
+	// =0 用宿主默认 TTL），返回的 token 可供下游（如 sandbox runtime）凭
+	// token 读取文件，避免暴露真实路径。
+	RegisterFileToken(ctx context.Context, in *RegisterFileTokenRequest, opts ...grpc.CallOption) (*RegisterFileTokenResponse, error)
+	// ── 插件定时任务（宿主 internal/cron）──
+	// CronCreate 创建定时任务（job_type: cron / interval / once 等，run_once
+	// + run_at(RFC3339) 用于一次性任务），返回宿主 Job 快照。
+	CronCreate(ctx context.Context, in *CronCreateRequest, opts ...grpc.CallOption) (*CronJobResponse, error)
+	// CronUpdate 按 job_id 更新任务字段（fields_json 指定更新字段集）。
+	CronUpdate(ctx context.Context, in *CronUpdateRequest, opts ...grpc.CallOption) (*CronJobResponse, error)
+	// CronDelete 删除指定定时任务。
+	CronDelete(ctx context.Context, in *CronDeleteRequest, opts ...grpc.CallOption) (*Empty, error)
+	// CronList 列出定时任务（job_type 空=全部）。
+	CronList(ctx context.Context, in *CronListRequest, opts ...grpc.CallOption) (*CronJobsResponse, error)
+	// CronRunNow 立即触发一次指定任务。
+	CronRunNow(ctx context.Context, in *CronRunNowRequest, opts ...grpc.CallOption) (*Empty, error)
+	// ── 宿主 MCP 读写桥接（只读列出 + 调用宿主侧 MCP 工具；插件自管 MCP
+	// 不经此通道）──
+	// McpListTools 列出宿主已连接 MCP server 的全部工具
+	// （每项 {server, name, description, schema_json}）。
+	McpListTools(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*McpToolsResponse, error)
+	// McpCallTool 调用宿主侧 MCP 工具（server + tool_name + arguments_json），
+	// 返回完整结果 JSON / 纯文本摘要 / 是否出错。
+	McpCallTool(ctx context.Context, in *McpCallToolRequest, opts ...grpc.CallOption) (*McpCallToolResponse, error)
 }
 
 type hostServiceClient struct {
@@ -1367,6 +1464,126 @@ func (c *hostServiceClient) DeletePlatformMessageHistory(ctx context.Context, in
 	return out, nil
 }
 
+func (c *hostServiceClient) KBRetrieve(ctx context.Context, in *KBRetrieveRequest, opts ...grpc.CallOption) (*KBRetrieveResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(KBRetrieveResponse)
+	err := c.cc.Invoke(ctx, HostService_KBRetrieve_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) KBUploadFromURL(ctx context.Context, in *KBUploadFromURLRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_KBUploadFromURL_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) KBListKBs(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*KBListResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(KBListResponse)
+	err := c.cc.Invoke(ctx, HostService_KBListKBs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) ListSkillsV2(ctx context.Context, in *ListSkillsV2Request, opts ...grpc.CallOption) (*SkillsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SkillsResponse)
+	err := c.cc.Invoke(ctx, HostService_ListSkillsV2_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) RegisterFileToken(ctx context.Context, in *RegisterFileTokenRequest, opts ...grpc.CallOption) (*RegisterFileTokenResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RegisterFileTokenResponse)
+	err := c.cc.Invoke(ctx, HostService_RegisterFileToken_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) CronCreate(ctx context.Context, in *CronCreateRequest, opts ...grpc.CallOption) (*CronJobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CronJobResponse)
+	err := c.cc.Invoke(ctx, HostService_CronCreate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) CronUpdate(ctx context.Context, in *CronUpdateRequest, opts ...grpc.CallOption) (*CronJobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CronJobResponse)
+	err := c.cc.Invoke(ctx, HostService_CronUpdate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) CronDelete(ctx context.Context, in *CronDeleteRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_CronDelete_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) CronList(ctx context.Context, in *CronListRequest, opts ...grpc.CallOption) (*CronJobsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CronJobsResponse)
+	err := c.cc.Invoke(ctx, HostService_CronList_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) CronRunNow(ctx context.Context, in *CronRunNowRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, HostService_CronRunNow_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) McpListTools(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*McpToolsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(McpToolsResponse)
+	err := c.cc.Invoke(ctx, HostService_McpListTools_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) McpCallTool(ctx context.Context, in *McpCallToolRequest, opts ...grpc.CallOption) (*McpCallToolResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(McpCallToolResponse)
+	err := c.cc.Invoke(ctx, HostService_McpCallTool_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // HostServiceServer is the server API for HostService service.
 // All implementations must embed UnimplementedHostServiceServer
 // for forward compatibility.
@@ -1480,6 +1697,47 @@ type HostServiceServer interface {
 	UpdatePlatformMessageHistory(context.Context, *UpdatePMHistoryRequest) (*Empty, error)
 	// DeletePlatformMessageHistory 按 ID 删除一条记录。
 	DeletePlatformMessageHistory(context.Context, *DeletePMHistoryRequest) (*Empty, error)
+	// ── 知识库（对齐宿主 internal/knowledgebase/manager.go）──
+	// KBRetrieve 检索知识库：按 query 做向量/融合检索。kb_names 为空 =
+	// 宿主全部启用中的知识库；top_k_fusion 为融合召回数，top_m_final 为最终
+	// 保留条数（<=0 用宿主默认）。返回拼接后的上下文文本与检索结果 JSON 数组
+	// （空结果时 context_text 为空、results_json 为 "[]"）。
+	KBRetrieve(context.Context, *KBRetrieveRequest) (*KBRetrieveResponse, error)
+	// KBUploadFromURL 让宿主从 URL 拉取文档写入指定知识库并分块（chunk_size/
+	// chunk_overlap <=0 用宿主默认）。
+	KBUploadFromURL(context.Context, *KBUploadFromURLRequest) (*Empty, error)
+	// KBListKBs 列出宿主全部知识库元数据（每项为 KnowledgeBase 结构 JSON）。
+	KBListKBs(context.Context, *Empty) (*KBListResponse, error)
+	// ── 技能视图扩展（sandbox runtime 视图）──
+	// ListSkillsV2 带过滤参数的技能列表：active_only 仅返回启用技能；runtime
+	// 过滤运行时视图（"local"/"sandbox"/""=全部）；show_sandbox_path 返回
+	// sandbox 路径而非宿主本地路径。复用既有 SkillsResponse。
+	ListSkillsV2(context.Context, *ListSkillsV2Request) (*SkillsResponse, error)
+	// ── 文件令牌（file_token 文件服务）──
+	// RegisterFileToken 把一个宿主侧文件路径登记为一次性令牌（timeout_sec
+	// =0 用宿主默认 TTL），返回的 token 可供下游（如 sandbox runtime）凭
+	// token 读取文件，避免暴露真实路径。
+	RegisterFileToken(context.Context, *RegisterFileTokenRequest) (*RegisterFileTokenResponse, error)
+	// ── 插件定时任务（宿主 internal/cron）──
+	// CronCreate 创建定时任务（job_type: cron / interval / once 等，run_once
+	// + run_at(RFC3339) 用于一次性任务），返回宿主 Job 快照。
+	CronCreate(context.Context, *CronCreateRequest) (*CronJobResponse, error)
+	// CronUpdate 按 job_id 更新任务字段（fields_json 指定更新字段集）。
+	CronUpdate(context.Context, *CronUpdateRequest) (*CronJobResponse, error)
+	// CronDelete 删除指定定时任务。
+	CronDelete(context.Context, *CronDeleteRequest) (*Empty, error)
+	// CronList 列出定时任务（job_type 空=全部）。
+	CronList(context.Context, *CronListRequest) (*CronJobsResponse, error)
+	// CronRunNow 立即触发一次指定任务。
+	CronRunNow(context.Context, *CronRunNowRequest) (*Empty, error)
+	// ── 宿主 MCP 读写桥接（只读列出 + 调用宿主侧 MCP 工具；插件自管 MCP
+	// 不经此通道）──
+	// McpListTools 列出宿主已连接 MCP server 的全部工具
+	// （每项 {server, name, description, schema_json}）。
+	McpListTools(context.Context, *Empty) (*McpToolsResponse, error)
+	// McpCallTool 调用宿主侧 MCP 工具（server + tool_name + arguments_json），
+	// 返回完整结果 JSON / 纯文本摘要 / 是否出错。
+	McpCallTool(context.Context, *McpCallToolRequest) (*McpCallToolResponse, error)
 	mustEmbedUnimplementedHostServiceServer()
 }
 
@@ -1630,6 +1888,42 @@ func (UnimplementedHostServiceServer) UpdatePlatformMessageHistory(context.Conte
 }
 func (UnimplementedHostServiceServer) DeletePlatformMessageHistory(context.Context, *DeletePMHistoryRequest) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeletePlatformMessageHistory not implemented")
+}
+func (UnimplementedHostServiceServer) KBRetrieve(context.Context, *KBRetrieveRequest) (*KBRetrieveResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method KBRetrieve not implemented")
+}
+func (UnimplementedHostServiceServer) KBUploadFromURL(context.Context, *KBUploadFromURLRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method KBUploadFromURL not implemented")
+}
+func (UnimplementedHostServiceServer) KBListKBs(context.Context, *Empty) (*KBListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method KBListKBs not implemented")
+}
+func (UnimplementedHostServiceServer) ListSkillsV2(context.Context, *ListSkillsV2Request) (*SkillsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListSkillsV2 not implemented")
+}
+func (UnimplementedHostServiceServer) RegisterFileToken(context.Context, *RegisterFileTokenRequest) (*RegisterFileTokenResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RegisterFileToken not implemented")
+}
+func (UnimplementedHostServiceServer) CronCreate(context.Context, *CronCreateRequest) (*CronJobResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CronCreate not implemented")
+}
+func (UnimplementedHostServiceServer) CronUpdate(context.Context, *CronUpdateRequest) (*CronJobResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CronUpdate not implemented")
+}
+func (UnimplementedHostServiceServer) CronDelete(context.Context, *CronDeleteRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CronDelete not implemented")
+}
+func (UnimplementedHostServiceServer) CronList(context.Context, *CronListRequest) (*CronJobsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CronList not implemented")
+}
+func (UnimplementedHostServiceServer) CronRunNow(context.Context, *CronRunNowRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CronRunNow not implemented")
+}
+func (UnimplementedHostServiceServer) McpListTools(context.Context, *Empty) (*McpToolsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method McpListTools not implemented")
+}
+func (UnimplementedHostServiceServer) McpCallTool(context.Context, *McpCallToolRequest) (*McpCallToolResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method McpCallTool not implemented")
 }
 func (UnimplementedHostServiceServer) mustEmbedUnimplementedHostServiceServer() {}
 func (UnimplementedHostServiceServer) testEmbeddedByValue()                     {}
@@ -2498,6 +2792,222 @@ func _HostService_DeletePlatformMessageHistory_Handler(srv interface{}, ctx cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HostService_KBRetrieve_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(KBRetrieveRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).KBRetrieve(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_KBRetrieve_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).KBRetrieve(ctx, req.(*KBRetrieveRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_KBUploadFromURL_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(KBUploadFromURLRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).KBUploadFromURL(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_KBUploadFromURL_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).KBUploadFromURL(ctx, req.(*KBUploadFromURLRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_KBListKBs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).KBListKBs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_KBListKBs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).KBListKBs(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_ListSkillsV2_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSkillsV2Request)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).ListSkillsV2(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_ListSkillsV2_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).ListSkillsV2(ctx, req.(*ListSkillsV2Request))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_RegisterFileToken_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterFileTokenRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).RegisterFileToken(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_RegisterFileToken_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).RegisterFileToken(ctx, req.(*RegisterFileTokenRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_CronCreate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CronCreateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).CronCreate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_CronCreate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).CronCreate(ctx, req.(*CronCreateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_CronUpdate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CronUpdateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).CronUpdate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_CronUpdate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).CronUpdate(ctx, req.(*CronUpdateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_CronDelete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CronDeleteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).CronDelete(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_CronDelete_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).CronDelete(ctx, req.(*CronDeleteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_CronList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CronListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).CronList(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_CronList_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).CronList(ctx, req.(*CronListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_CronRunNow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CronRunNowRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).CronRunNow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_CronRunNow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).CronRunNow(ctx, req.(*CronRunNowRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_McpListTools_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).McpListTools(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_McpListTools_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).McpListTools(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_McpCallTool_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(McpCallToolRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).McpCallTool(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_McpCallTool_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).McpCallTool(ctx, req.(*McpCallToolRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // HostService_ServiceDesc is the grpc.ServiceDesc for HostService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2692,6 +3202,54 @@ var HostService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeletePlatformMessageHistory",
 			Handler:    _HostService_DeletePlatformMessageHistory_Handler,
+		},
+		{
+			MethodName: "KBRetrieve",
+			Handler:    _HostService_KBRetrieve_Handler,
+		},
+		{
+			MethodName: "KBUploadFromURL",
+			Handler:    _HostService_KBUploadFromURL_Handler,
+		},
+		{
+			MethodName: "KBListKBs",
+			Handler:    _HostService_KBListKBs_Handler,
+		},
+		{
+			MethodName: "ListSkillsV2",
+			Handler:    _HostService_ListSkillsV2_Handler,
+		},
+		{
+			MethodName: "RegisterFileToken",
+			Handler:    _HostService_RegisterFileToken_Handler,
+		},
+		{
+			MethodName: "CronCreate",
+			Handler:    _HostService_CronCreate_Handler,
+		},
+		{
+			MethodName: "CronUpdate",
+			Handler:    _HostService_CronUpdate_Handler,
+		},
+		{
+			MethodName: "CronDelete",
+			Handler:    _HostService_CronDelete_Handler,
+		},
+		{
+			MethodName: "CronList",
+			Handler:    _HostService_CronList_Handler,
+		},
+		{
+			MethodName: "CronRunNow",
+			Handler:    _HostService_CronRunNow_Handler,
+		},
+		{
+			MethodName: "McpListTools",
+			Handler:    _HostService_McpListTools_Handler,
+		},
+		{
+			MethodName: "McpCallTool",
+			Handler:    _HostService_McpCallTool_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
