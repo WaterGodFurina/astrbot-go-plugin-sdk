@@ -83,8 +83,17 @@ func SDKEventToEvent(se *sdkv1.SDKEvent) *Event {
 }
 
 // componentsToProto 把 SDK Component 切片转成 proto Component。
-// 媒体 Base64 转 bytes base64_data；Json 卡片 Data 保留 data_json。
+// 媒体 Base64 转 bytes base64_data；Json 卡片 Data 保留 data_json；
+// Reply 引用消息携带 sender_*/chain（嵌套，带深度上限）。
 func componentsToProto(chain []Component) []*sdkv1.Component {
+	return componentsToProtoDepth(chain, 0)
+}
+
+// maxComponentDepth 与 Python SDK serialize.py 的 _MAX_NODE_DEPTH 对齐，
+// 防御畸形自嵌套链（Reply/Forward）导致递归构造过深。
+const maxComponentDepth = 50
+
+func componentsToProtoDepth(chain []Component, depth int) []*sdkv1.Component {
 	out := make([]*sdkv1.Component, 0, len(chain))
 	for _, c := range chain {
 		pc := &sdkv1.Component{
@@ -108,13 +117,18 @@ func componentsToProto(chain []Component) []*sdkv1.Component {
 				pc.DataJson = b
 			}
 		}
+		if depth < maxComponentDepth && len(c.Chain) > 0 {
+			pc.Chain = componentsToProtoDepth(c.Chain, depth+1)
+		}
+		pc.SenderId, pc.SenderName, pc.SenderTime = c.SenderID, c.SenderName, c.SenderTime
 		out = append(out, pc)
 	}
 	return out
 }
 
 // protoToComponents 把 proto Component 还原为 SDK Component。
-// base64_data → Base64 string；data_json → Data map。
+// base64_data → Base64 string；data_json → Data map；Reply 引用消息还原
+// sender_*/chain（嵌套递归）。
 func protoToComponents(comps []*sdkv1.Component) []Component {
 	out := make([]Component, 0, len(comps))
 	for _, c := range comps {
@@ -122,15 +136,21 @@ func protoToComponents(comps []*sdkv1.Component) []Component {
 			continue
 		}
 		sc := Component{
-			Type:     ComponentType(c.Type),
-			Text:     c.Text,
-			TargetID: c.TargetId,
-			Name:     c.Name,
-			URL:      c.Url,
-			Path:     c.Path,
-			File:     c.File,
-			FileID:   c.FileId,
-			ID:       c.Id,
+			Type:       ComponentType(c.Type),
+			Text:       c.Text,
+			TargetID:   c.TargetId,
+			Name:       c.Name,
+			URL:        c.Url,
+			Path:       c.Path,
+			File:       c.File,
+			FileID:     c.FileId,
+			ID:         c.Id,
+			SenderID:   c.SenderId,
+			SenderName: c.SenderName,
+			SenderTime: c.SenderTime,
+		}
+		if len(c.Chain) > 0 {
+			sc.Chain = protoToComponents(c.Chain)
 		}
 		if len(c.Base64Data) > 0 {
 			sc.Base64 = base64.StdEncoding.EncodeToString(c.Base64Data)

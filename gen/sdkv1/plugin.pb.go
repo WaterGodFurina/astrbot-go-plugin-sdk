@@ -2857,6 +2857,13 @@ type Component struct {
 	Id         string         `protobuf:"bytes,10,opt,name=id,proto3" json:"id,omitempty"`
 	DataJson   []byte         `protobuf:"bytes,11,opt,name=data_json,json=dataJson,proto3" json:"data_json,omitempty"` // Json 卡片等动态结构（保留 JSON）
 	Payload    *BinaryPayload `protobuf:"bytes,12,opt,name=payload,proto3" json:"payload,omitempty"`                   // 媒体二进制（inline bytes 或 FileReference）
+	// Reply 引用消息扩展（宿主 → 插件方向；插件发送方向仍只需 id/text）：
+	// 被引用消息的发送者与内容链，对齐 Python Reply 语义
+	// （sender_id/sender_nickname/time/chain/message_str）。
+	SenderId   string       `protobuf:"bytes,13,opt,name=sender_id,json=senderId,proto3" json:"sender_id,omitempty"`        // 被引用消息发送者 ID
+	SenderName string       `protobuf:"bytes,14,opt,name=sender_name,json=senderName,proto3" json:"sender_name,omitempty"`  // 被引用消息发送者昵称
+	SenderTime int64        `protobuf:"varint,15,opt,name=sender_time,json=senderTime,proto3" json:"sender_time,omitempty"` // 被引用消息发送时间（unix 秒）
+	Chain      []*Component `protobuf:"bytes,16,rep,name=chain,proto3" json:"chain,omitempty"`                              // 被引用消息内容链（嵌套，带深度上限）
 }
 
 func (x *Component) Reset() {
@@ -2971,6 +2978,34 @@ func (x *Component) GetDataJson() []byte {
 func (x *Component) GetPayload() *BinaryPayload {
 	if x != nil {
 		return x.Payload
+	}
+	return nil
+}
+
+func (x *Component) GetSenderId() string {
+	if x != nil {
+		return x.SenderId
+	}
+	return ""
+}
+
+func (x *Component) GetSenderName() string {
+	if x != nil {
+		return x.SenderName
+	}
+	return ""
+}
+
+func (x *Component) GetSenderTime() int64 {
+	if x != nil {
+		return x.SenderTime
+	}
+	return 0
+}
+
+func (x *Component) GetChain() []*Component {
+	if x != nil {
+		return x.Chain
 	}
 	return nil
 }
@@ -8275,7 +8310,7 @@ var file_plugin_proto_rawDesc = []byte{
 	0x04, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x19, 0x2e, 0x61, 0x73, 0x74, 0x72, 0x62, 0x6f, 0x74, 0x2e,
 	0x73, 0x64, 0x6b, 0x2e, 0x76, 0x31, 0x2e, 0x43, 0x6f, 0x6d, 0x70, 0x6f, 0x6e, 0x65, 0x6e, 0x74,
 	0x52, 0x0f, 0x63, 0x68, 0x61, 0x69, 0x6e, 0x43, 0x6f, 0x6d, 0x70, 0x6f, 0x6e, 0x65, 0x6e, 0x74,
-	0x73, 0x4a, 0x04, 0x08, 0x03, 0x10, 0x04, 0x22, 0xbe, 0x02, 0x0a, 0x09, 0x43, 0x6f, 0x6d, 0x70,
+	0x73, 0x4a, 0x04, 0x08, 0x03, 0x10, 0x04, 0x22, 0xce, 0x03, 0x0a, 0x09, 0x43, 0x6f, 0x6d, 0x70,
 	0x6f, 0x6e, 0x65, 0x6e, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x74, 0x79, 0x70, 0x65, 0x18, 0x01, 0x20,
 	0x01, 0x28, 0x09, 0x52, 0x04, 0x74, 0x79, 0x70, 0x65, 0x12, 0x12, 0x0a, 0x04, 0x74, 0x65, 0x78,
 	0x74, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x74, 0x65, 0x78, 0x74, 0x12, 0x1b, 0x0a,
@@ -8295,7 +8330,16 @@ var file_plugin_proto_rawDesc = []byte{
 	0x37, 0x0a, 0x07, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64, 0x18, 0x0c, 0x20, 0x01, 0x28, 0x0b,
 	0x32, 0x1d, 0x2e, 0x61, 0x73, 0x74, 0x72, 0x62, 0x6f, 0x74, 0x2e, 0x73, 0x64, 0x6b, 0x2e, 0x76,
 	0x31, 0x2e, 0x42, 0x69, 0x6e, 0x61, 0x72, 0x79, 0x50, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64, 0x52,
-	0x07, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64, 0x22, 0x51, 0x0a, 0x14, 0x52, 0x65, 0x63, 0x61,
+	0x07, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64, 0x12, 0x1b, 0x0a, 0x09, 0x73, 0x65, 0x6e, 0x64,
+	0x65, 0x72, 0x5f, 0x69, 0x64, 0x18, 0x0d, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x73, 0x65, 0x6e,
+	0x64, 0x65, 0x72, 0x49, 0x64, 0x12, 0x1f, 0x0a, 0x0b, 0x73, 0x65, 0x6e, 0x64, 0x65, 0x72, 0x5f,
+	0x6e, 0x61, 0x6d, 0x65, 0x18, 0x0e, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0a, 0x73, 0x65, 0x6e, 0x64,
+	0x65, 0x72, 0x4e, 0x61, 0x6d, 0x65, 0x12, 0x1f, 0x0a, 0x0b, 0x73, 0x65, 0x6e, 0x64, 0x65, 0x72,
+	0x5f, 0x74, 0x69, 0x6d, 0x65, 0x18, 0x0f, 0x20, 0x01, 0x28, 0x03, 0x52, 0x0a, 0x73, 0x65, 0x6e,
+	0x64, 0x65, 0x72, 0x54, 0x69, 0x6d, 0x65, 0x12, 0x2f, 0x0a, 0x05, 0x63, 0x68, 0x61, 0x69, 0x6e,
+	0x18, 0x10, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x19, 0x2e, 0x61, 0x73, 0x74, 0x72, 0x62, 0x6f, 0x74,
+	0x2e, 0x73, 0x64, 0x6b, 0x2e, 0x76, 0x31, 0x2e, 0x43, 0x6f, 0x6d, 0x70, 0x6f, 0x6e, 0x65, 0x6e,
+	0x74, 0x52, 0x05, 0x63, 0x68, 0x61, 0x69, 0x6e, 0x22, 0x51, 0x0a, 0x14, 0x52, 0x65, 0x63, 0x61,
 	0x6c, 0x6c, 0x4d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74,
 	0x12, 0x1a, 0x0a, 0x08, 0x70, 0x6c, 0x61, 0x74, 0x66, 0x6f, 0x72, 0x6d, 0x18, 0x01, 0x20, 0x01,
 	0x28, 0x09, 0x52, 0x08, 0x70, 0x6c, 0x61, 0x74, 0x66, 0x6f, 0x72, 0x6d, 0x12, 0x1d, 0x0a, 0x0a,
@@ -9370,160 +9414,161 @@ var file_plugin_proto_depIdxs = []int32{
 	19,  // 27: astrbot.sdk.v1.ListWebApisResponse.web_apis:type_name -> astrbot.sdk.v1.WebApiDesc
 	40,  // 28: astrbot.sdk.v1.SendMessageRequest.chain_components:type_name -> astrbot.sdk.v1.Component
 	1,   // 29: astrbot.sdk.v1.Component.payload:type_name -> astrbot.sdk.v1.BinaryPayload
-	0,   // 30: astrbot.sdk.v1.FeedSessionWaitRequest.event:type_name -> astrbot.sdk.v1.SDKEvent
-	16,  // 31: astrbot.sdk.v1.PluginService.Register:input_type -> astrbot.sdk.v1.RegisterRequest
-	24,  // 32: astrbot.sdk.v1.PluginService.HandleCommand:input_type -> astrbot.sdk.v1.HandleCommandRequest
-	26,  // 33: astrbot.sdk.v1.PluginService.HandleFilter:input_type -> astrbot.sdk.v1.HandleFilterRequest
-	28,  // 34: astrbot.sdk.v1.PluginService.HandleHook:input_type -> astrbot.sdk.v1.HandleHookRequest
-	30,  // 35: astrbot.sdk.v1.PluginService.HandleLLMRequest:input_type -> astrbot.sdk.v1.HandleLLMRequestRequest
-	32,  // 36: astrbot.sdk.v1.PluginService.HandleTool:input_type -> astrbot.sdk.v1.HandleToolRequest
-	10,  // 37: astrbot.sdk.v1.PluginService.ListTools:input_type -> astrbot.sdk.v1.Empty
-	10,  // 38: astrbot.sdk.v1.PluginService.ListWebApis:input_type -> astrbot.sdk.v1.Empty
-	22,  // 39: astrbot.sdk.v1.PluginService.HandleWebRequest:input_type -> astrbot.sdk.v1.HandleWebRequestRequest
-	10,  // 40: astrbot.sdk.v1.PluginService.HealthCheck:input_type -> astrbot.sdk.v1.Empty
-	17,  // 41: astrbot.sdk.v1.PluginService.SetLogLevel:input_type -> astrbot.sdk.v1.SetLogLevelRequest
-	93,  // 42: astrbot.sdk.v1.PluginService.FeedSessionWait:input_type -> astrbot.sdk.v1.FeedSessionWaitRequest
-	10,  // 43: astrbot.sdk.v1.PluginService.GetConfigSchema:input_type -> astrbot.sdk.v1.Empty
-	10,  // 44: astrbot.sdk.v1.PluginService.Cleanup:input_type -> astrbot.sdk.v1.Empty
-	120, // 45: astrbot.sdk.v1.PluginService.FeedCronJob:input_type -> astrbot.sdk.v1.FeedCronJobRequest
-	37,  // 46: astrbot.sdk.v1.HostService.CallAction:input_type -> astrbot.sdk.v1.CallActionRequest
-	39,  // 47: astrbot.sdk.v1.HostService.SendMessage:input_type -> astrbot.sdk.v1.SendMessageRequest
-	41,  // 48: astrbot.sdk.v1.HostService.RecallMessage:input_type -> astrbot.sdk.v1.RecallMessageRequest
-	42,  // 49: astrbot.sdk.v1.HostService.GetConfig:input_type -> astrbot.sdk.v1.GetConfigRequest
-	44,  // 50: astrbot.sdk.v1.HostService.SetConfig:input_type -> astrbot.sdk.v1.SetConfigRequest
-	45,  // 51: astrbot.sdk.v1.HostService.ChatLLM:input_type -> astrbot.sdk.v1.ChatLLMRequest
-	47,  // 52: astrbot.sdk.v1.HostService.React:input_type -> astrbot.sdk.v1.ReactRequest
-	48,  // 53: astrbot.sdk.v1.HostService.TextToImage:input_type -> astrbot.sdk.v1.TextToImageRequest
-	50,  // 54: astrbot.sdk.v1.HostService.HtmlRender:input_type -> astrbot.sdk.v1.HtmlRenderRequest
-	52,  // 55: astrbot.sdk.v1.HostService.GetCurrConversationID:input_type -> astrbot.sdk.v1.ConversationIDRequest
-	54,  // 56: astrbot.sdk.v1.HostService.NewConversation:input_type -> astrbot.sdk.v1.NewConversationRequest
-	55,  // 57: astrbot.sdk.v1.HostService.GetConversation:input_type -> astrbot.sdk.v1.GetConversationRequest
-	57,  // 58: astrbot.sdk.v1.HostService.GetConversations:input_type -> astrbot.sdk.v1.GetConversationsRequest
-	59,  // 59: astrbot.sdk.v1.HostService.DeleteConversation:input_type -> astrbot.sdk.v1.DeleteConversationRequest
-	60,  // 60: astrbot.sdk.v1.HostService.SwitchConversation:input_type -> astrbot.sdk.v1.SwitchConversationRequest
-	61,  // 61: astrbot.sdk.v1.HostService.UpdateConversationTitle:input_type -> astrbot.sdk.v1.UpdateConversationTitleRequest
-	62,  // 62: astrbot.sdk.v1.HostService.UpdateConversationPersonaID:input_type -> astrbot.sdk.v1.UpdateConversationPersonaRequest
-	10,  // 63: astrbot.sdk.v1.HostService.GetPersonas:input_type -> astrbot.sdk.v1.Empty
-	64,  // 64: astrbot.sdk.v1.HostService.GetDefaultPersona:input_type -> astrbot.sdk.v1.GetDefaultPersonaRequest
-	10,  // 65: astrbot.sdk.v1.HostService.GetPersonaTree:input_type -> astrbot.sdk.v1.Empty
-	68,  // 66: astrbot.sdk.v1.HostService.ResolveSelectedPersona:input_type -> astrbot.sdk.v1.ResolvePersonaRequest
-	70,  // 67: astrbot.sdk.v1.HostService.ListProviders:input_type -> astrbot.sdk.v1.ListProvidersRequest
-	73,  // 68: astrbot.sdk.v1.HostService.GetUsingProvider:input_type -> astrbot.sdk.v1.GetUsingProviderRequest
-	75,  // 69: astrbot.sdk.v1.HostService.SetProvider:input_type -> astrbot.sdk.v1.SetProviderRequest
-	76,  // 70: astrbot.sdk.v1.HostService.GetProviderModels:input_type -> astrbot.sdk.v1.GetProviderModelsRequest
-	10,  // 71: astrbot.sdk.v1.HostService.GetPluginRegistry:input_type -> astrbot.sdk.v1.Empty
-	79,  // 72: astrbot.sdk.v1.HostService.GetStar:input_type -> astrbot.sdk.v1.GetStarRequest
-	86,  // 73: astrbot.sdk.v1.HostService.SetPluginEnabled:input_type -> astrbot.sdk.v1.SetPluginEnabledRequest
-	87,  // 74: astrbot.sdk.v1.HostService.InstallPlugin:input_type -> astrbot.sdk.v1.InstallPluginRequest
-	88,  // 75: astrbot.sdk.v1.HostService.UninstallPlugin:input_type -> astrbot.sdk.v1.UninstallPluginRequest
-	10,  // 76: astrbot.sdk.v1.HostService.ListCommandDescriptors:input_type -> astrbot.sdk.v1.Empty
-	10,  // 77: astrbot.sdk.v1.HostService.ListPlatforms:input_type -> astrbot.sdk.v1.Empty
-	89,  // 78: astrbot.sdk.v1.HostService.RegisterSessionWait:input_type -> astrbot.sdk.v1.RegisterSessionWaitRequest
-	91,  // 79: astrbot.sdk.v1.HostService.UnregisterSessionWait:input_type -> astrbot.sdk.v1.UnregisterSessionWaitRequest
-	92,  // 80: astrbot.sdk.v1.HostService.RegisterBridgeHook:input_type -> astrbot.sdk.v1.BridgeHookRequest
-	92,  // 81: astrbot.sdk.v1.HostService.UnregisterBridgeHook:input_type -> astrbot.sdk.v1.BridgeHookRequest
-	3,   // 82: astrbot.sdk.v1.HostService.CreateBlob:input_type -> astrbot.sdk.v1.CreateBlobRequest
-	5,   // 83: astrbot.sdk.v1.HostService.ReadBlob:input_type -> astrbot.sdk.v1.ReadBlobRequest
-	7,   // 84: astrbot.sdk.v1.HostService.GetBlobInfo:input_type -> astrbot.sdk.v1.GetBlobInfoRequest
-	9,   // 85: astrbot.sdk.v1.HostService.ReleaseBlob:input_type -> astrbot.sdk.v1.ReleaseBlobRequest
-	10,  // 86: astrbot.sdk.v1.HostService.ListSkills:input_type -> astrbot.sdk.v1.Empty
-	97,  // 87: astrbot.sdk.v1.HostService.SetSkillActive:input_type -> astrbot.sdk.v1.SetSkillActiveRequest
-	98,  // 88: astrbot.sdk.v1.HostService.DeleteSkill:input_type -> astrbot.sdk.v1.DeleteSkillRequest
-	100, // 89: astrbot.sdk.v1.HostService.GetPlatformMessageHistory:input_type -> astrbot.sdk.v1.GetPMHistoryRequest
-	102, // 90: astrbot.sdk.v1.HostService.InsertPlatformMessageHistory:input_type -> astrbot.sdk.v1.InsertPMHistoryRequest
-	104, // 91: astrbot.sdk.v1.HostService.UpdatePlatformMessageHistory:input_type -> astrbot.sdk.v1.UpdatePMHistoryRequest
-	105, // 92: astrbot.sdk.v1.HostService.DeletePlatformMessageHistory:input_type -> astrbot.sdk.v1.DeletePMHistoryRequest
-	106, // 93: astrbot.sdk.v1.HostService.KBRetrieve:input_type -> astrbot.sdk.v1.KBRetrieveRequest
-	108, // 94: astrbot.sdk.v1.HostService.KBUploadFromURL:input_type -> astrbot.sdk.v1.KBUploadFromURLRequest
-	10,  // 95: astrbot.sdk.v1.HostService.KBListKBs:input_type -> astrbot.sdk.v1.Empty
-	110, // 96: astrbot.sdk.v1.HostService.ListSkillsV2:input_type -> astrbot.sdk.v1.ListSkillsV2Request
-	111, // 97: astrbot.sdk.v1.HostService.RegisterFileToken:input_type -> astrbot.sdk.v1.RegisterFileTokenRequest
-	113, // 98: astrbot.sdk.v1.HostService.CronCreate:input_type -> astrbot.sdk.v1.CronCreateRequest
-	114, // 99: astrbot.sdk.v1.HostService.CronUpdate:input_type -> astrbot.sdk.v1.CronUpdateRequest
-	116, // 100: astrbot.sdk.v1.HostService.CronDelete:input_type -> astrbot.sdk.v1.CronDeleteRequest
-	117, // 101: astrbot.sdk.v1.HostService.CronList:input_type -> astrbot.sdk.v1.CronListRequest
-	119, // 102: astrbot.sdk.v1.HostService.CronRunNow:input_type -> astrbot.sdk.v1.CronRunNowRequest
-	10,  // 103: astrbot.sdk.v1.HostService.McpListTools:input_type -> astrbot.sdk.v1.Empty
-	123, // 104: astrbot.sdk.v1.HostService.McpCallTool:input_type -> astrbot.sdk.v1.McpCallToolRequest
-	18,  // 105: astrbot.sdk.v1.PluginService.Register:output_type -> astrbot.sdk.v1.RegisterResponse
-	25,  // 106: astrbot.sdk.v1.PluginService.HandleCommand:output_type -> astrbot.sdk.v1.HandleCommandResponse
-	27,  // 107: astrbot.sdk.v1.PluginService.HandleFilter:output_type -> astrbot.sdk.v1.HandleFilterResponse
-	29,  // 108: astrbot.sdk.v1.PluginService.HandleHook:output_type -> astrbot.sdk.v1.HookResponse
-	31,  // 109: astrbot.sdk.v1.PluginService.HandleLLMRequest:output_type -> astrbot.sdk.v1.HandleLLMRequestResponse
-	33,  // 110: astrbot.sdk.v1.PluginService.HandleTool:output_type -> astrbot.sdk.v1.HandleToolResponse
-	34,  // 111: astrbot.sdk.v1.PluginService.ListTools:output_type -> astrbot.sdk.v1.ListToolsResponse
-	35,  // 112: astrbot.sdk.v1.PluginService.ListWebApis:output_type -> astrbot.sdk.v1.ListWebApisResponse
-	23,  // 113: astrbot.sdk.v1.PluginService.HandleWebRequest:output_type -> astrbot.sdk.v1.HandleWebRequestResponse
-	36,  // 114: astrbot.sdk.v1.PluginService.HealthCheck:output_type -> astrbot.sdk.v1.HealthResponse
-	10,  // 115: astrbot.sdk.v1.PluginService.SetLogLevel:output_type -> astrbot.sdk.v1.Empty
-	94,  // 116: astrbot.sdk.v1.PluginService.FeedSessionWait:output_type -> astrbot.sdk.v1.FeedSessionWaitResponse
-	95,  // 117: astrbot.sdk.v1.PluginService.GetConfigSchema:output_type -> astrbot.sdk.v1.GetConfigSchemaResponse
-	10,  // 118: astrbot.sdk.v1.PluginService.Cleanup:output_type -> astrbot.sdk.v1.Empty
-	121, // 119: astrbot.sdk.v1.PluginService.FeedCronJob:output_type -> astrbot.sdk.v1.FeedCronJobResponse
-	38,  // 120: astrbot.sdk.v1.HostService.CallAction:output_type -> astrbot.sdk.v1.CallActionResponse
-	10,  // 121: astrbot.sdk.v1.HostService.SendMessage:output_type -> astrbot.sdk.v1.Empty
-	10,  // 122: astrbot.sdk.v1.HostService.RecallMessage:output_type -> astrbot.sdk.v1.Empty
-	43,  // 123: astrbot.sdk.v1.HostService.GetConfig:output_type -> astrbot.sdk.v1.GetConfigResponse
-	10,  // 124: astrbot.sdk.v1.HostService.SetConfig:output_type -> astrbot.sdk.v1.Empty
-	46,  // 125: astrbot.sdk.v1.HostService.ChatLLM:output_type -> astrbot.sdk.v1.ChatLLMResponse
-	10,  // 126: astrbot.sdk.v1.HostService.React:output_type -> astrbot.sdk.v1.Empty
-	49,  // 127: astrbot.sdk.v1.HostService.TextToImage:output_type -> astrbot.sdk.v1.TextToImageResponse
-	51,  // 128: astrbot.sdk.v1.HostService.HtmlRender:output_type -> astrbot.sdk.v1.HtmlRenderResponse
-	53,  // 129: astrbot.sdk.v1.HostService.GetCurrConversationID:output_type -> astrbot.sdk.v1.ConversationIDResponse
-	53,  // 130: astrbot.sdk.v1.HostService.NewConversation:output_type -> astrbot.sdk.v1.ConversationIDResponse
-	56,  // 131: astrbot.sdk.v1.HostService.GetConversation:output_type -> astrbot.sdk.v1.ConversationResponse
-	58,  // 132: astrbot.sdk.v1.HostService.GetConversations:output_type -> astrbot.sdk.v1.ConversationsResponse
-	10,  // 133: astrbot.sdk.v1.HostService.DeleteConversation:output_type -> astrbot.sdk.v1.Empty
-	10,  // 134: astrbot.sdk.v1.HostService.SwitchConversation:output_type -> astrbot.sdk.v1.Empty
-	10,  // 135: astrbot.sdk.v1.HostService.UpdateConversationTitle:output_type -> astrbot.sdk.v1.Empty
-	10,  // 136: astrbot.sdk.v1.HostService.UpdateConversationPersonaID:output_type -> astrbot.sdk.v1.Empty
-	66,  // 137: astrbot.sdk.v1.HostService.GetPersonas:output_type -> astrbot.sdk.v1.PersonasResponse
-	65,  // 138: astrbot.sdk.v1.HostService.GetDefaultPersona:output_type -> astrbot.sdk.v1.PersonaResponse
-	67,  // 139: astrbot.sdk.v1.HostService.GetPersonaTree:output_type -> astrbot.sdk.v1.PersonaTreeResponse
-	69,  // 140: astrbot.sdk.v1.HostService.ResolveSelectedPersona:output_type -> astrbot.sdk.v1.ResolvePersonaResponse
-	72,  // 141: astrbot.sdk.v1.HostService.ListProviders:output_type -> astrbot.sdk.v1.ProvidersResponse
-	74,  // 142: astrbot.sdk.v1.HostService.GetUsingProvider:output_type -> astrbot.sdk.v1.ProviderResponse
-	10,  // 143: astrbot.sdk.v1.HostService.SetProvider:output_type -> astrbot.sdk.v1.Empty
-	77,  // 144: astrbot.sdk.v1.HostService.GetProviderModels:output_type -> astrbot.sdk.v1.ProviderModelsResponse
-	80,  // 145: astrbot.sdk.v1.HostService.GetPluginRegistry:output_type -> astrbot.sdk.v1.StarsResponse
-	85,  // 146: astrbot.sdk.v1.HostService.GetStar:output_type -> astrbot.sdk.v1.StarResponse
-	10,  // 147: astrbot.sdk.v1.HostService.SetPluginEnabled:output_type -> astrbot.sdk.v1.Empty
-	10,  // 148: astrbot.sdk.v1.HostService.InstallPlugin:output_type -> astrbot.sdk.v1.Empty
-	10,  // 149: astrbot.sdk.v1.HostService.UninstallPlugin:output_type -> astrbot.sdk.v1.Empty
-	82,  // 150: astrbot.sdk.v1.HostService.ListCommandDescriptors:output_type -> astrbot.sdk.v1.CommandDescriptorsResponse
-	84,  // 151: astrbot.sdk.v1.HostService.ListPlatforms:output_type -> astrbot.sdk.v1.PlatformsResponse
-	90,  // 152: astrbot.sdk.v1.HostService.RegisterSessionWait:output_type -> astrbot.sdk.v1.RegisterSessionWaitResponse
-	10,  // 153: astrbot.sdk.v1.HostService.UnregisterSessionWait:output_type -> astrbot.sdk.v1.Empty
-	10,  // 154: astrbot.sdk.v1.HostService.RegisterBridgeHook:output_type -> astrbot.sdk.v1.Empty
-	10,  // 155: astrbot.sdk.v1.HostService.UnregisterBridgeHook:output_type -> astrbot.sdk.v1.Empty
-	4,   // 156: astrbot.sdk.v1.HostService.CreateBlob:output_type -> astrbot.sdk.v1.CreateBlobResponse
-	6,   // 157: astrbot.sdk.v1.HostService.ReadBlob:output_type -> astrbot.sdk.v1.ReadBlobResponse
-	8,   // 158: astrbot.sdk.v1.HostService.GetBlobInfo:output_type -> astrbot.sdk.v1.GetBlobInfoResponse
-	10,  // 159: astrbot.sdk.v1.HostService.ReleaseBlob:output_type -> astrbot.sdk.v1.Empty
-	96,  // 160: astrbot.sdk.v1.HostService.ListSkills:output_type -> astrbot.sdk.v1.SkillsResponse
-	10,  // 161: astrbot.sdk.v1.HostService.SetSkillActive:output_type -> astrbot.sdk.v1.Empty
-	10,  // 162: astrbot.sdk.v1.HostService.DeleteSkill:output_type -> astrbot.sdk.v1.Empty
-	101, // 163: astrbot.sdk.v1.HostService.GetPlatformMessageHistory:output_type -> astrbot.sdk.v1.PMHistoryRecordsResponse
-	103, // 164: astrbot.sdk.v1.HostService.InsertPlatformMessageHistory:output_type -> astrbot.sdk.v1.PMHistoryRecordResponse
-	10,  // 165: astrbot.sdk.v1.HostService.UpdatePlatformMessageHistory:output_type -> astrbot.sdk.v1.Empty
-	10,  // 166: astrbot.sdk.v1.HostService.DeletePlatformMessageHistory:output_type -> astrbot.sdk.v1.Empty
-	107, // 167: astrbot.sdk.v1.HostService.KBRetrieve:output_type -> astrbot.sdk.v1.KBRetrieveResponse
-	10,  // 168: astrbot.sdk.v1.HostService.KBUploadFromURL:output_type -> astrbot.sdk.v1.Empty
-	109, // 169: astrbot.sdk.v1.HostService.KBListKBs:output_type -> astrbot.sdk.v1.KBListResponse
-	96,  // 170: astrbot.sdk.v1.HostService.ListSkillsV2:output_type -> astrbot.sdk.v1.SkillsResponse
-	112, // 171: astrbot.sdk.v1.HostService.RegisterFileToken:output_type -> astrbot.sdk.v1.RegisterFileTokenResponse
-	115, // 172: astrbot.sdk.v1.HostService.CronCreate:output_type -> astrbot.sdk.v1.CronJobResponse
-	115, // 173: astrbot.sdk.v1.HostService.CronUpdate:output_type -> astrbot.sdk.v1.CronJobResponse
-	10,  // 174: astrbot.sdk.v1.HostService.CronDelete:output_type -> astrbot.sdk.v1.Empty
-	118, // 175: astrbot.sdk.v1.HostService.CronList:output_type -> astrbot.sdk.v1.CronJobsResponse
-	10,  // 176: astrbot.sdk.v1.HostService.CronRunNow:output_type -> astrbot.sdk.v1.Empty
-	122, // 177: astrbot.sdk.v1.HostService.McpListTools:output_type -> astrbot.sdk.v1.McpToolsResponse
-	124, // 178: astrbot.sdk.v1.HostService.McpCallTool:output_type -> astrbot.sdk.v1.McpCallToolResponse
-	105, // [105:179] is the sub-list for method output_type
-	31,  // [31:105] is the sub-list for method input_type
-	31,  // [31:31] is the sub-list for extension type_name
-	31,  // [31:31] is the sub-list for extension extendee
-	0,   // [0:31] is the sub-list for field type_name
+	40,  // 30: astrbot.sdk.v1.Component.chain:type_name -> astrbot.sdk.v1.Component
+	0,   // 31: astrbot.sdk.v1.FeedSessionWaitRequest.event:type_name -> astrbot.sdk.v1.SDKEvent
+	16,  // 32: astrbot.sdk.v1.PluginService.Register:input_type -> astrbot.sdk.v1.RegisterRequest
+	24,  // 33: astrbot.sdk.v1.PluginService.HandleCommand:input_type -> astrbot.sdk.v1.HandleCommandRequest
+	26,  // 34: astrbot.sdk.v1.PluginService.HandleFilter:input_type -> astrbot.sdk.v1.HandleFilterRequest
+	28,  // 35: astrbot.sdk.v1.PluginService.HandleHook:input_type -> astrbot.sdk.v1.HandleHookRequest
+	30,  // 36: astrbot.sdk.v1.PluginService.HandleLLMRequest:input_type -> astrbot.sdk.v1.HandleLLMRequestRequest
+	32,  // 37: astrbot.sdk.v1.PluginService.HandleTool:input_type -> astrbot.sdk.v1.HandleToolRequest
+	10,  // 38: astrbot.sdk.v1.PluginService.ListTools:input_type -> astrbot.sdk.v1.Empty
+	10,  // 39: astrbot.sdk.v1.PluginService.ListWebApis:input_type -> astrbot.sdk.v1.Empty
+	22,  // 40: astrbot.sdk.v1.PluginService.HandleWebRequest:input_type -> astrbot.sdk.v1.HandleWebRequestRequest
+	10,  // 41: astrbot.sdk.v1.PluginService.HealthCheck:input_type -> astrbot.sdk.v1.Empty
+	17,  // 42: astrbot.sdk.v1.PluginService.SetLogLevel:input_type -> astrbot.sdk.v1.SetLogLevelRequest
+	93,  // 43: astrbot.sdk.v1.PluginService.FeedSessionWait:input_type -> astrbot.sdk.v1.FeedSessionWaitRequest
+	10,  // 44: astrbot.sdk.v1.PluginService.GetConfigSchema:input_type -> astrbot.sdk.v1.Empty
+	10,  // 45: astrbot.sdk.v1.PluginService.Cleanup:input_type -> astrbot.sdk.v1.Empty
+	120, // 46: astrbot.sdk.v1.PluginService.FeedCronJob:input_type -> astrbot.sdk.v1.FeedCronJobRequest
+	37,  // 47: astrbot.sdk.v1.HostService.CallAction:input_type -> astrbot.sdk.v1.CallActionRequest
+	39,  // 48: astrbot.sdk.v1.HostService.SendMessage:input_type -> astrbot.sdk.v1.SendMessageRequest
+	41,  // 49: astrbot.sdk.v1.HostService.RecallMessage:input_type -> astrbot.sdk.v1.RecallMessageRequest
+	42,  // 50: astrbot.sdk.v1.HostService.GetConfig:input_type -> astrbot.sdk.v1.GetConfigRequest
+	44,  // 51: astrbot.sdk.v1.HostService.SetConfig:input_type -> astrbot.sdk.v1.SetConfigRequest
+	45,  // 52: astrbot.sdk.v1.HostService.ChatLLM:input_type -> astrbot.sdk.v1.ChatLLMRequest
+	47,  // 53: astrbot.sdk.v1.HostService.React:input_type -> astrbot.sdk.v1.ReactRequest
+	48,  // 54: astrbot.sdk.v1.HostService.TextToImage:input_type -> astrbot.sdk.v1.TextToImageRequest
+	50,  // 55: astrbot.sdk.v1.HostService.HtmlRender:input_type -> astrbot.sdk.v1.HtmlRenderRequest
+	52,  // 56: astrbot.sdk.v1.HostService.GetCurrConversationID:input_type -> astrbot.sdk.v1.ConversationIDRequest
+	54,  // 57: astrbot.sdk.v1.HostService.NewConversation:input_type -> astrbot.sdk.v1.NewConversationRequest
+	55,  // 58: astrbot.sdk.v1.HostService.GetConversation:input_type -> astrbot.sdk.v1.GetConversationRequest
+	57,  // 59: astrbot.sdk.v1.HostService.GetConversations:input_type -> astrbot.sdk.v1.GetConversationsRequest
+	59,  // 60: astrbot.sdk.v1.HostService.DeleteConversation:input_type -> astrbot.sdk.v1.DeleteConversationRequest
+	60,  // 61: astrbot.sdk.v1.HostService.SwitchConversation:input_type -> astrbot.sdk.v1.SwitchConversationRequest
+	61,  // 62: astrbot.sdk.v1.HostService.UpdateConversationTitle:input_type -> astrbot.sdk.v1.UpdateConversationTitleRequest
+	62,  // 63: astrbot.sdk.v1.HostService.UpdateConversationPersonaID:input_type -> astrbot.sdk.v1.UpdateConversationPersonaRequest
+	10,  // 64: astrbot.sdk.v1.HostService.GetPersonas:input_type -> astrbot.sdk.v1.Empty
+	64,  // 65: astrbot.sdk.v1.HostService.GetDefaultPersona:input_type -> astrbot.sdk.v1.GetDefaultPersonaRequest
+	10,  // 66: astrbot.sdk.v1.HostService.GetPersonaTree:input_type -> astrbot.sdk.v1.Empty
+	68,  // 67: astrbot.sdk.v1.HostService.ResolveSelectedPersona:input_type -> astrbot.sdk.v1.ResolvePersonaRequest
+	70,  // 68: astrbot.sdk.v1.HostService.ListProviders:input_type -> astrbot.sdk.v1.ListProvidersRequest
+	73,  // 69: astrbot.sdk.v1.HostService.GetUsingProvider:input_type -> astrbot.sdk.v1.GetUsingProviderRequest
+	75,  // 70: astrbot.sdk.v1.HostService.SetProvider:input_type -> astrbot.sdk.v1.SetProviderRequest
+	76,  // 71: astrbot.sdk.v1.HostService.GetProviderModels:input_type -> astrbot.sdk.v1.GetProviderModelsRequest
+	10,  // 72: astrbot.sdk.v1.HostService.GetPluginRegistry:input_type -> astrbot.sdk.v1.Empty
+	79,  // 73: astrbot.sdk.v1.HostService.GetStar:input_type -> astrbot.sdk.v1.GetStarRequest
+	86,  // 74: astrbot.sdk.v1.HostService.SetPluginEnabled:input_type -> astrbot.sdk.v1.SetPluginEnabledRequest
+	87,  // 75: astrbot.sdk.v1.HostService.InstallPlugin:input_type -> astrbot.sdk.v1.InstallPluginRequest
+	88,  // 76: astrbot.sdk.v1.HostService.UninstallPlugin:input_type -> astrbot.sdk.v1.UninstallPluginRequest
+	10,  // 77: astrbot.sdk.v1.HostService.ListCommandDescriptors:input_type -> astrbot.sdk.v1.Empty
+	10,  // 78: astrbot.sdk.v1.HostService.ListPlatforms:input_type -> astrbot.sdk.v1.Empty
+	89,  // 79: astrbot.sdk.v1.HostService.RegisterSessionWait:input_type -> astrbot.sdk.v1.RegisterSessionWaitRequest
+	91,  // 80: astrbot.sdk.v1.HostService.UnregisterSessionWait:input_type -> astrbot.sdk.v1.UnregisterSessionWaitRequest
+	92,  // 81: astrbot.sdk.v1.HostService.RegisterBridgeHook:input_type -> astrbot.sdk.v1.BridgeHookRequest
+	92,  // 82: astrbot.sdk.v1.HostService.UnregisterBridgeHook:input_type -> astrbot.sdk.v1.BridgeHookRequest
+	3,   // 83: astrbot.sdk.v1.HostService.CreateBlob:input_type -> astrbot.sdk.v1.CreateBlobRequest
+	5,   // 84: astrbot.sdk.v1.HostService.ReadBlob:input_type -> astrbot.sdk.v1.ReadBlobRequest
+	7,   // 85: astrbot.sdk.v1.HostService.GetBlobInfo:input_type -> astrbot.sdk.v1.GetBlobInfoRequest
+	9,   // 86: astrbot.sdk.v1.HostService.ReleaseBlob:input_type -> astrbot.sdk.v1.ReleaseBlobRequest
+	10,  // 87: astrbot.sdk.v1.HostService.ListSkills:input_type -> astrbot.sdk.v1.Empty
+	97,  // 88: astrbot.sdk.v1.HostService.SetSkillActive:input_type -> astrbot.sdk.v1.SetSkillActiveRequest
+	98,  // 89: astrbot.sdk.v1.HostService.DeleteSkill:input_type -> astrbot.sdk.v1.DeleteSkillRequest
+	100, // 90: astrbot.sdk.v1.HostService.GetPlatformMessageHistory:input_type -> astrbot.sdk.v1.GetPMHistoryRequest
+	102, // 91: astrbot.sdk.v1.HostService.InsertPlatformMessageHistory:input_type -> astrbot.sdk.v1.InsertPMHistoryRequest
+	104, // 92: astrbot.sdk.v1.HostService.UpdatePlatformMessageHistory:input_type -> astrbot.sdk.v1.UpdatePMHistoryRequest
+	105, // 93: astrbot.sdk.v1.HostService.DeletePlatformMessageHistory:input_type -> astrbot.sdk.v1.DeletePMHistoryRequest
+	106, // 94: astrbot.sdk.v1.HostService.KBRetrieve:input_type -> astrbot.sdk.v1.KBRetrieveRequest
+	108, // 95: astrbot.sdk.v1.HostService.KBUploadFromURL:input_type -> astrbot.sdk.v1.KBUploadFromURLRequest
+	10,  // 96: astrbot.sdk.v1.HostService.KBListKBs:input_type -> astrbot.sdk.v1.Empty
+	110, // 97: astrbot.sdk.v1.HostService.ListSkillsV2:input_type -> astrbot.sdk.v1.ListSkillsV2Request
+	111, // 98: astrbot.sdk.v1.HostService.RegisterFileToken:input_type -> astrbot.sdk.v1.RegisterFileTokenRequest
+	113, // 99: astrbot.sdk.v1.HostService.CronCreate:input_type -> astrbot.sdk.v1.CronCreateRequest
+	114, // 100: astrbot.sdk.v1.HostService.CronUpdate:input_type -> astrbot.sdk.v1.CronUpdateRequest
+	116, // 101: astrbot.sdk.v1.HostService.CronDelete:input_type -> astrbot.sdk.v1.CronDeleteRequest
+	117, // 102: astrbot.sdk.v1.HostService.CronList:input_type -> astrbot.sdk.v1.CronListRequest
+	119, // 103: astrbot.sdk.v1.HostService.CronRunNow:input_type -> astrbot.sdk.v1.CronRunNowRequest
+	10,  // 104: astrbot.sdk.v1.HostService.McpListTools:input_type -> astrbot.sdk.v1.Empty
+	123, // 105: astrbot.sdk.v1.HostService.McpCallTool:input_type -> astrbot.sdk.v1.McpCallToolRequest
+	18,  // 106: astrbot.sdk.v1.PluginService.Register:output_type -> astrbot.sdk.v1.RegisterResponse
+	25,  // 107: astrbot.sdk.v1.PluginService.HandleCommand:output_type -> astrbot.sdk.v1.HandleCommandResponse
+	27,  // 108: astrbot.sdk.v1.PluginService.HandleFilter:output_type -> astrbot.sdk.v1.HandleFilterResponse
+	29,  // 109: astrbot.sdk.v1.PluginService.HandleHook:output_type -> astrbot.sdk.v1.HookResponse
+	31,  // 110: astrbot.sdk.v1.PluginService.HandleLLMRequest:output_type -> astrbot.sdk.v1.HandleLLMRequestResponse
+	33,  // 111: astrbot.sdk.v1.PluginService.HandleTool:output_type -> astrbot.sdk.v1.HandleToolResponse
+	34,  // 112: astrbot.sdk.v1.PluginService.ListTools:output_type -> astrbot.sdk.v1.ListToolsResponse
+	35,  // 113: astrbot.sdk.v1.PluginService.ListWebApis:output_type -> astrbot.sdk.v1.ListWebApisResponse
+	23,  // 114: astrbot.sdk.v1.PluginService.HandleWebRequest:output_type -> astrbot.sdk.v1.HandleWebRequestResponse
+	36,  // 115: astrbot.sdk.v1.PluginService.HealthCheck:output_type -> astrbot.sdk.v1.HealthResponse
+	10,  // 116: astrbot.sdk.v1.PluginService.SetLogLevel:output_type -> astrbot.sdk.v1.Empty
+	94,  // 117: astrbot.sdk.v1.PluginService.FeedSessionWait:output_type -> astrbot.sdk.v1.FeedSessionWaitResponse
+	95,  // 118: astrbot.sdk.v1.PluginService.GetConfigSchema:output_type -> astrbot.sdk.v1.GetConfigSchemaResponse
+	10,  // 119: astrbot.sdk.v1.PluginService.Cleanup:output_type -> astrbot.sdk.v1.Empty
+	121, // 120: astrbot.sdk.v1.PluginService.FeedCronJob:output_type -> astrbot.sdk.v1.FeedCronJobResponse
+	38,  // 121: astrbot.sdk.v1.HostService.CallAction:output_type -> astrbot.sdk.v1.CallActionResponse
+	10,  // 122: astrbot.sdk.v1.HostService.SendMessage:output_type -> astrbot.sdk.v1.Empty
+	10,  // 123: astrbot.sdk.v1.HostService.RecallMessage:output_type -> astrbot.sdk.v1.Empty
+	43,  // 124: astrbot.sdk.v1.HostService.GetConfig:output_type -> astrbot.sdk.v1.GetConfigResponse
+	10,  // 125: astrbot.sdk.v1.HostService.SetConfig:output_type -> astrbot.sdk.v1.Empty
+	46,  // 126: astrbot.sdk.v1.HostService.ChatLLM:output_type -> astrbot.sdk.v1.ChatLLMResponse
+	10,  // 127: astrbot.sdk.v1.HostService.React:output_type -> astrbot.sdk.v1.Empty
+	49,  // 128: astrbot.sdk.v1.HostService.TextToImage:output_type -> astrbot.sdk.v1.TextToImageResponse
+	51,  // 129: astrbot.sdk.v1.HostService.HtmlRender:output_type -> astrbot.sdk.v1.HtmlRenderResponse
+	53,  // 130: astrbot.sdk.v1.HostService.GetCurrConversationID:output_type -> astrbot.sdk.v1.ConversationIDResponse
+	53,  // 131: astrbot.sdk.v1.HostService.NewConversation:output_type -> astrbot.sdk.v1.ConversationIDResponse
+	56,  // 132: astrbot.sdk.v1.HostService.GetConversation:output_type -> astrbot.sdk.v1.ConversationResponse
+	58,  // 133: astrbot.sdk.v1.HostService.GetConversations:output_type -> astrbot.sdk.v1.ConversationsResponse
+	10,  // 134: astrbot.sdk.v1.HostService.DeleteConversation:output_type -> astrbot.sdk.v1.Empty
+	10,  // 135: astrbot.sdk.v1.HostService.SwitchConversation:output_type -> astrbot.sdk.v1.Empty
+	10,  // 136: astrbot.sdk.v1.HostService.UpdateConversationTitle:output_type -> astrbot.sdk.v1.Empty
+	10,  // 137: astrbot.sdk.v1.HostService.UpdateConversationPersonaID:output_type -> astrbot.sdk.v1.Empty
+	66,  // 138: astrbot.sdk.v1.HostService.GetPersonas:output_type -> astrbot.sdk.v1.PersonasResponse
+	65,  // 139: astrbot.sdk.v1.HostService.GetDefaultPersona:output_type -> astrbot.sdk.v1.PersonaResponse
+	67,  // 140: astrbot.sdk.v1.HostService.GetPersonaTree:output_type -> astrbot.sdk.v1.PersonaTreeResponse
+	69,  // 141: astrbot.sdk.v1.HostService.ResolveSelectedPersona:output_type -> astrbot.sdk.v1.ResolvePersonaResponse
+	72,  // 142: astrbot.sdk.v1.HostService.ListProviders:output_type -> astrbot.sdk.v1.ProvidersResponse
+	74,  // 143: astrbot.sdk.v1.HostService.GetUsingProvider:output_type -> astrbot.sdk.v1.ProviderResponse
+	10,  // 144: astrbot.sdk.v1.HostService.SetProvider:output_type -> astrbot.sdk.v1.Empty
+	77,  // 145: astrbot.sdk.v1.HostService.GetProviderModels:output_type -> astrbot.sdk.v1.ProviderModelsResponse
+	80,  // 146: astrbot.sdk.v1.HostService.GetPluginRegistry:output_type -> astrbot.sdk.v1.StarsResponse
+	85,  // 147: astrbot.sdk.v1.HostService.GetStar:output_type -> astrbot.sdk.v1.StarResponse
+	10,  // 148: astrbot.sdk.v1.HostService.SetPluginEnabled:output_type -> astrbot.sdk.v1.Empty
+	10,  // 149: astrbot.sdk.v1.HostService.InstallPlugin:output_type -> astrbot.sdk.v1.Empty
+	10,  // 150: astrbot.sdk.v1.HostService.UninstallPlugin:output_type -> astrbot.sdk.v1.Empty
+	82,  // 151: astrbot.sdk.v1.HostService.ListCommandDescriptors:output_type -> astrbot.sdk.v1.CommandDescriptorsResponse
+	84,  // 152: astrbot.sdk.v1.HostService.ListPlatforms:output_type -> astrbot.sdk.v1.PlatformsResponse
+	90,  // 153: astrbot.sdk.v1.HostService.RegisterSessionWait:output_type -> astrbot.sdk.v1.RegisterSessionWaitResponse
+	10,  // 154: astrbot.sdk.v1.HostService.UnregisterSessionWait:output_type -> astrbot.sdk.v1.Empty
+	10,  // 155: astrbot.sdk.v1.HostService.RegisterBridgeHook:output_type -> astrbot.sdk.v1.Empty
+	10,  // 156: astrbot.sdk.v1.HostService.UnregisterBridgeHook:output_type -> astrbot.sdk.v1.Empty
+	4,   // 157: astrbot.sdk.v1.HostService.CreateBlob:output_type -> astrbot.sdk.v1.CreateBlobResponse
+	6,   // 158: astrbot.sdk.v1.HostService.ReadBlob:output_type -> astrbot.sdk.v1.ReadBlobResponse
+	8,   // 159: astrbot.sdk.v1.HostService.GetBlobInfo:output_type -> astrbot.sdk.v1.GetBlobInfoResponse
+	10,  // 160: astrbot.sdk.v1.HostService.ReleaseBlob:output_type -> astrbot.sdk.v1.Empty
+	96,  // 161: astrbot.sdk.v1.HostService.ListSkills:output_type -> astrbot.sdk.v1.SkillsResponse
+	10,  // 162: astrbot.sdk.v1.HostService.SetSkillActive:output_type -> astrbot.sdk.v1.Empty
+	10,  // 163: astrbot.sdk.v1.HostService.DeleteSkill:output_type -> astrbot.sdk.v1.Empty
+	101, // 164: astrbot.sdk.v1.HostService.GetPlatformMessageHistory:output_type -> astrbot.sdk.v1.PMHistoryRecordsResponse
+	103, // 165: astrbot.sdk.v1.HostService.InsertPlatformMessageHistory:output_type -> astrbot.sdk.v1.PMHistoryRecordResponse
+	10,  // 166: astrbot.sdk.v1.HostService.UpdatePlatformMessageHistory:output_type -> astrbot.sdk.v1.Empty
+	10,  // 167: astrbot.sdk.v1.HostService.DeletePlatformMessageHistory:output_type -> astrbot.sdk.v1.Empty
+	107, // 168: astrbot.sdk.v1.HostService.KBRetrieve:output_type -> astrbot.sdk.v1.KBRetrieveResponse
+	10,  // 169: astrbot.sdk.v1.HostService.KBUploadFromURL:output_type -> astrbot.sdk.v1.Empty
+	109, // 170: astrbot.sdk.v1.HostService.KBListKBs:output_type -> astrbot.sdk.v1.KBListResponse
+	96,  // 171: astrbot.sdk.v1.HostService.ListSkillsV2:output_type -> astrbot.sdk.v1.SkillsResponse
+	112, // 172: astrbot.sdk.v1.HostService.RegisterFileToken:output_type -> astrbot.sdk.v1.RegisterFileTokenResponse
+	115, // 173: astrbot.sdk.v1.HostService.CronCreate:output_type -> astrbot.sdk.v1.CronJobResponse
+	115, // 174: astrbot.sdk.v1.HostService.CronUpdate:output_type -> astrbot.sdk.v1.CronJobResponse
+	10,  // 175: astrbot.sdk.v1.HostService.CronDelete:output_type -> astrbot.sdk.v1.Empty
+	118, // 176: astrbot.sdk.v1.HostService.CronList:output_type -> astrbot.sdk.v1.CronJobsResponse
+	10,  // 177: astrbot.sdk.v1.HostService.CronRunNow:output_type -> astrbot.sdk.v1.Empty
+	122, // 178: astrbot.sdk.v1.HostService.McpListTools:output_type -> astrbot.sdk.v1.McpToolsResponse
+	124, // 179: astrbot.sdk.v1.HostService.McpCallTool:output_type -> astrbot.sdk.v1.McpCallToolResponse
+	106, // [106:180] is the sub-list for method output_type
+	32,  // [32:106] is the sub-list for method input_type
+	32,  // [32:32] is the sub-list for extension type_name
+	32,  // [32:32] is the sub-list for extension extendee
+	0,   // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_plugin_proto_init() }

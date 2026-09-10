@@ -50,6 +50,12 @@ type Component struct {
 	FileID   string         `json:"file_id,omitempty"`
 	ID       string         `json:"id,omitempty"`
 	Data     map[string]any `json:"data,omitempty"`
+	// Reply 引用消息扩展（宿主 → 插件方向，对齐 Python Reply 语义）：
+	// 被引用消息的发送者与内容链；插件发送方向仍只需 ID。
+	SenderID   string      `json:"sender_id,omitempty"`
+	SenderName string      `json:"sender_name,omitempty"`
+	SenderTime int64       `json:"sender_time,omitempty"`
+	Chain      []Component `json:"chain,omitempty"`
 }
 
 // Text creates a plain-text component.

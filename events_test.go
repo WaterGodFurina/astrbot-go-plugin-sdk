@@ -413,3 +413,71 @@ func TestP1MetadataSemantics(t *testing.T) {
 		})
 	}
 }
+
+// TestReplyQuotedChainRoundTrip 验证 Reply 引用消息的扩展字段（被引用内容
+// chain 与 sender 元数据）经 proto 往返不丢失——OneBot 引用消息 → 插件的
+// 传输回归（对齐 Python Reply 语义）。
+func TestReplyQuotedChainRoundTrip(t *testing.T) {
+	reply := Component{
+		Type: CompReply, ID: "r1", Text: "被引用文本",
+		SenderID: "10001", SenderName: "阿明", SenderTime: 1788000123,
+		Chain: []Component{
+			{Type: CompPlain, Text: "被引用文本"},
+			{Type: CompImage, URL: "https://example.com/q.png"},
+		},
+	}
+	pc := componentsToProto([]Component{reply})
+	if len(pc) != 1 || pc[0].SenderId != "10001" || pc[0].SenderName != "阿明" || pc[0].SenderTime != 1788000123 {
+		t.Fatalf("proto reply sender mismatch: %+v", pc)
+	}
+	if len(pc[0].Chain) != 2 || pc[0].Chain[0].Text != "被引用文本" || pc[0].Chain[1].Url != "https://example.com/q.png" {
+		t.Fatalf("proto reply chain mismatch: %+v", pc[0].Chain)
+	}
+	// wire 往返（marshal/unmarshal 后还原）。
+	wire, err := proto.Marshal(&sdkv1.SDKEvent{Components: pc})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var se2 sdkv1.SDKEvent
+	if err := proto.Unmarshal(wire, &se2); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	back := protoToComponents(se2.Components)
+	if len(back) != 1 {
+		t.Fatalf("chain length = %d", len(back))
+	}
+	r := back[0]
+	if r.Type != CompReply || r.ID != "r1" || r.Text != "被引用文本" {
+		t.Fatalf("reply base mismatch: %+v", r)
+	}
+	if r.SenderID != "10001" || r.SenderName != "阿明" || r.SenderTime != 1788000123 {
+		t.Fatalf("reply sender mismatch: %+v", r)
+	}
+	if len(r.Chain) != 2 || r.Chain[0].Type != CompPlain || r.Chain[0].Text != "被引用文本" ||
+		r.Chain[1].Type != CompImage || r.Chain[1].URL != "https://example.com/q.png" {
+		t.Fatalf("reply chain mismatch: %+v", r.Chain)
+	}
+}
+
+// TestReplyChainDepthCap 验证深层嵌套 Reply 链在转换到 proto 时被深度上限
+// 截断，不会无限递归（Go 值类型构造不出循环引用，用 60 层嵌套逼近上限）。
+func TestReplyChainDepthCap(t *testing.T) {
+	r := Component{Type: CompReply, ID: "leaf"}
+	for i := 0; i < 60; i++ {
+		r = Component{Type: CompReply, ID: strconv.Itoa(i), Chain: []Component{r}}
+	}
+	pc := componentsToProto([]Component{r})
+	if len(pc) != 1 {
+		t.Fatalf("chain length = %d", len(pc))
+	}
+	depth := 0
+	for cur := pc[0]; len(cur.Chain) > 0; cur = cur.Chain[0] {
+		depth++
+		if depth > maxComponentDepth {
+			t.Fatalf("depth cap exceeded: %d", depth)
+		}
+	}
+	if depth != maxComponentDepth {
+		t.Fatalf("depth = %d, want %d", depth, maxComponentDepth)
+	}
+}
