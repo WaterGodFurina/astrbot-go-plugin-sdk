@@ -1254,11 +1254,15 @@ type hostServiceServer struct {
 	sdkv1.UnimplementedHostServiceServer
 	// idMu 保护 pluginID（BindHostServiceName 写、各 RPC 读）。
 	idMu sync.RWMutex
-	// pluginID 是当前连接身份：accept 时为 manifest id，Register 后由
-	// BindHostServiceName 更新为注册名（GetConfig/SetConfig 传的是注册名）。
+	// pluginID 是当前连接的注册名：accept 时为 manifest id，Register 后由
+	// BindHostServiceName 更新为插件自报的注册名。仅用于配置归属校验
+	//（GetConfig/SetConfig 的 req.PluginName != identity()）与以注册名为参数
+	// 的 hook；切勿用于管理鉴权（注册名可被冒用）。
 	pluginID string
-	// connKey 是 accept 时刻的 manifest id，hostServers 表以此作为 key；
-	// 连接关闭时用于清理 hostServers 与限流表条目（26-3）。
+	// connKey 是 accept 时刻绑定的 manifest id（hostServers 表 key）：
+	//   - 管理鉴权键（connectionID），manifest id 由宿主分配、插件无法自报；
+	//   - 连接关闭时用于清理 hostServers 与限流表条目（26-3）。
+	// BindHostServiceName 只改注册名 pluginID，绝不清空/覆盖 connKey。
 	connKey string
 	// sessionWaitMu 保护 sessionWaitIDs / sessionWaitHasID。
 	sessionWaitMu sync.Mutex
@@ -1270,8 +1274,28 @@ type hostServiceServer struct {
 	sessionWaitHasID bool
 }
 
-// identity 返回当前连接身份（带锁读 pluginID）。
+// identity 返回当前连接的注册名（带锁读 pluginID）。注册名是插件 Register 时
+// 自报的名字，只能用于"配置归属"校验（GetConfig/SetConfig 的
+// req.PluginName != s.identity()）与以注册名为参数的 hook。
+//
+// 安全：注册名可被任意插件声明，绝不能作为管理鉴权键——恶意插件只要与管理员
+// 插件重名即可冒充。管理鉴权一律用 connectionID()（连接绑定的 manifest id）。
 func (s *hostServiceServer) identity() string {
+	s.idMu.RLock()
+	defer s.idMu.RUnlock()
+	return s.pluginID
+}
+
+// connectionID 返回 accept 时刻绑定到本连接的 manifest id（connKey），是管理
+// 鉴权（hostAdminAuthorized）的唯一键。manifest id 由宿主按安装来源分配、插件
+// 无法自行声明，故与管理员插件重名也无法冒充。
+//
+// connKey 为空（旧宿主未调用 SetCurrentHostPluginID，或测试直接构造）时回退
+// 注册名 pluginID，保持兼容；connKey 一旦绑定不再变更，无需加锁。
+func (s *hostServiceServer) connectionID() string {
+	if s.connKey != "" {
+		return s.connKey
+	}
 	s.idMu.RLock()
 	defer s.idMu.RUnlock()
 	return s.pluginID
@@ -1309,10 +1333,14 @@ func currentHostPluginID() string {
 }
 
 // BindHostServiceName updates the per-connection HostService server's plugin
-// identity to the plugin's registered name (Register 返回值）。插件
+// identity to the plugin's registered name（Register 返回值）。插件
 // GetConfig/SetConfig 传的是注册名，而 accept 时只绑定 manifest id，二者
 // 可能不同（如 jm_cosmos vs astrbot_plugin_jm_cosmos），故宿主在 Register
-// 成功后调用本函数对齐身份，保证身份隔离校验通过。
+// 成功后调用本函数对齐"配置归属"身份，保证身份隔离校验通过。
+//
+// 安全：只更新注册名 pluginID，绝不触碰 connKey——管理鉴权始终以 accept 时
+// 绑定的 manifest id（connectionID）为准，注册名不得反过来覆盖鉴权键，否则
+// 重名冒充漏洞复现。
 func BindHostServiceName(id, name string) {
 	hostServersMu.Lock()
 	defer hostServersMu.Unlock()
@@ -1923,8 +1951,10 @@ func (s *hostServiceServer) SetPluginEnabled(_ context.Context, req *sdkv1.SetPl
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
-	// 目标校验：插件只能启停自身，操作其他插件须在管理员名单内（26-2）。
-	if req.PluginName != s.identity() && !hostAdminAuthorized(s.identity()) {
+	// 目标校验：插件只能启停自身（按注册名比对 s.identity()），操作其他插件
+	// 须在管理员名单内。管理鉴权以连接绑定的 manifest id（connectionID）为键，
+	// 注册名重名无法冒充（26-2 / p11）。
+	if req.PluginName != s.identity() && !hostAdminAuthorized(s.connectionID()) {
 		return nil, status.Errorf(codes.PermissionDenied,
 			"插件 %q 无权操作插件 %q（仅允许操作自身，或经宿主授权的管理插件）", s.identity(), req.PluginName)
 	}
@@ -1944,7 +1974,8 @@ func (s *hostServiceServer) InstallPlugin(_ context.Context, req *sdkv1.InstallP
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
-	if !hostAdminAuthorized(s.identity()) {
+	// 管理鉴权键 = 连接绑定的 manifest id（connectionID），不是可被冒用的注册名。
+	if !hostAdminAuthorized(s.connectionID()) {
 		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权安装插件（需宿主授权为管理插件）", s.identity())
 	}
 	h := getHostHooks()
@@ -1962,7 +1993,8 @@ func (s *hostServiceServer) UninstallPlugin(_ context.Context, req *sdkv1.Uninst
 		return nil, err
 	}
 	// 卸载只允许管理员名单内的插件执行（自身也在名单内时受同一约束）。
-	if !hostAdminAuthorized(s.identity()) {
+	// 管理鉴权键 = 连接绑定的 manifest id（connectionID），不是可被冒用的注册名。
+	if !hostAdminAuthorized(s.connectionID()) {
 		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权卸载插件（需宿主授权为管理插件）", s.identity())
 	}
 	h := getHostHooks()
@@ -2543,31 +2575,37 @@ func (s *hostServiceServer) McpCallTool(_ context.Context, req *sdkv1.McpCallToo
 const maxChatLLMPerMinute = 30
 
 // hostAdminList 是获准执行插件管理操作（SetPluginEnabled 操作他插件、
-// InstallPlugin/UninstallPlugin）的插件名单，由宿主在启动前经
-// SetPluginAdminList 配置。空名单表示无管理员插件（默认仅允许插件操作
-// 自身）。
+// InstallPlugin/UninstallPlugin）的 *manifest id* 集合，由宿主在启动前经
+// SetPluginAdminList 配置。空集合表示无管理员插件（默认仅允许插件操作自身）。
+//
+// 清单语义 = manifest id 集合（不是注册名）：比对对象是连接绑定的
+// hostServiceServer.connectionID()。注册名由插件自报、可被重名冒用，绝不能
+// 作为鉴权键（p11）。
 var (
 	hostAdminListMu sync.RWMutex
 	hostAdminList   = map[string]struct{}{}
 )
 
-// SetPluginAdminList 设置可执行插件管理操作的插件名单（宿主在启动插件前
-// 调用；不调用则默认无管理员插件）。传 nil/空切片清空名单。
-func SetPluginAdminList(names []string) {
+// SetPluginAdminList 设置可执行插件管理操作的插件 manifest id 集合（宿主在
+// 启动插件前调用；不调用则默认无管理员插件）。传 nil/空切片清空名单。
+// 宿主须传入 manifest id（见 internal/plugin.pluginAdminListFromConfig），
+// 而非注册名。
+func SetPluginAdminList(ids []string) {
 	hostAdminListMu.Lock()
-	hostAdminList = make(map[string]struct{}, len(names))
-	for _, n := range names {
-		if n != "" {
-			hostAdminList[n] = struct{}{}
+	hostAdminList = make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			hostAdminList[id] = struct{}{}
 		}
 	}
 	hostAdminListMu.Unlock()
 }
 
-// hostAdminAuthorized 报告插件名是否在管理员名单中。
-func hostAdminAuthorized(pluginName string) bool {
+// hostAdminAuthorized 报告给定 manifest id 是否在管理员名单中。按 id 精确匹配
+//（大小写敏感、不 trim、不做子串），避免模糊匹配放大授权面。
+func hostAdminAuthorized(pluginID string) bool {
 	hostAdminListMu.RLock()
 	defer hostAdminListMu.RUnlock()
-	_, ok := hostAdminList[pluginName]
+	_, ok := hostAdminList[pluginID]
 	return ok
 }
