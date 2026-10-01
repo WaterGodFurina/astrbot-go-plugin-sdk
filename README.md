@@ -18,10 +18,7 @@ import (
     sdk "github.com/WaterGodFurina/Astrbot-go-plugin-sdk"
 )
 
-// plugin 是插件定义，必须提升为包级变量（不要内联在 main 里）：
-// gRPC 运行方式由 main 内的 sdk.Serve(plugin) 使用；Native 运行方式下
-// main() 不会执行，宿主构建期注入的 native_entry.go 直接引用该变量并
-// 交给 SDK Native 运行时（sdk.Register + sdk.NativeServe）。
+// plugin 是插件定义（包级变量，见下文「Native 运行方式」）
 var plugin = &sdk.Plugin{
     OnLoad: setup, // 启动钩子，可在里面动态注册
 }
