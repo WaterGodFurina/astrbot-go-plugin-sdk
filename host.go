@@ -43,6 +43,29 @@ var (
 	hostDialMu sync.Mutex
 )
 
+// nativeHostTarget 是 Native 运行方式下宿主 HostService 的 gRPC target
+// （由 serve_native.go 在 NativeServe 里经 setNativeHostTarget 设置）。
+// gRPC（go-plugin）运行方式下恒为空，hostServiceClient 走 broker 路径。
+var (
+	nativeHostTargetMu sync.RWMutex
+	nativeHostTarget   string
+)
+
+// setNativeHostTarget 记录宿主 HostService 的 gRPC target，供 Native 运行
+// 方式的反向调用使用（本文件在两种运行方式下都编译，仅 Native 设置）。
+func setNativeHostTarget(target string) {
+	nativeHostTargetMu.Lock()
+	nativeHostTarget = target
+	nativeHostTargetMu.Unlock()
+}
+
+// nativeHostTargetValue 返回宿主 HostService target；gRPC 运行方式下为空串。
+func nativeHostTargetValue() string {
+	nativeHostTargetMu.RLock()
+	defer nativeHostTargetMu.RUnlock()
+	return nativeHostTarget
+}
+
 // setBroker stores the go-plugin broker handed to GRPCServer so handlers can
 // dial the host lazily.
 func setBroker(b *plugin.GRPCBroker) {
@@ -63,6 +86,12 @@ func setBroker(b *plugin.GRPCBroker) {
 }
 
 func hostServiceClient() (sdkv1.HostServiceClient, error) {
+	// Native 运行方式：宿主 HostService 经 setNativeHostTarget 直接给出
+	// gRPC target，不走 go-plugin broker。
+	if t := nativeHostTargetValue(); t != "" {
+		return dialNativeHostService(t)
+	}
+
 	// 先在 brokerMu 内取出 broker 引用并立即释放读取锁，再进入 hostMu。
 	// 避免与 setBroker（brokerMu → hostMu 嵌套）构成 AB-BA 死锁：本函数
 	// 在取得 hostMu 前已释放 brokerMu，任何时刻都不嵌套持有两把锁。
@@ -116,6 +145,45 @@ func hostServiceClient() (sdkv1.HostServiceClient, error) {
 }
 
 var errNoBroker = &hostUnavailableError{"host service unavailable: plugin not being served"}
+
+// dialNativeHostService 是 Native 运行方式下插件→宿主的反向调用客户端：
+// 直接拨号 setNativeHostTarget 记录的 gRPC target（本机回环），不复用
+// go-plugin broker。仅缓存成功，瞬态失败不毒化缓存（同 broker 路径）。
+func dialNativeHostService(target string) (sdkv1.HostServiceClient, error) {
+	hostMu.Lock()
+	if hostDialDone && hostSvc != nil {
+		svc := hostSvc
+		hostMu.Unlock()
+		return svc, nil
+	}
+	hostMu.Unlock()
+
+	hostDialMu.Lock()
+	defer hostDialMu.Unlock()
+	hostMu.Lock()
+	if hostDialDone && hostSvc != nil {
+		svc := hostSvc
+		hostMu.Unlock()
+		return svc, nil
+	}
+	hostMu.Unlock()
+
+	conn, err := grpc.NewClient(target,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(maxGRPCMessageSize),
+			grpc.MaxCallSendMsgSize(maxGRPCMessageSize),
+		))
+	if err != nil {
+		return nil, err
+	}
+	hostMu.Lock()
+	hostConn = conn
+	hostSvc = sdkv1.NewHostServiceClient(conn)
+	hostDialDone = true
+	hostMu.Unlock()
+	return hostSvc, nil
+}
 
 type hostUnavailableError struct{ msg string }
 
@@ -1244,6 +1312,28 @@ func acceptHostService(b *plugin.GRPCBroker, id uint32) (*grpc.Server, net.Liste
 		_ = srv.Serve(lis)
 	}()
 	return srv, lis, server, nil
+}
+
+// ServeHostServiceOnListener serves the host's HostService on a plain loopback
+// listener for a Native plugin connection (no go-plugin broker). pluginID is the
+// plugin's manifest id used for reverse-call identity validation. It registers
+// the per-connection server in the hostServers map; the host must bind it to
+// the plugin's Client via Client.AttachNativeHostService so Close() can stop it
+// and drop per-connection state (26-3).
+func ServeHostServiceOnListener(lis net.Listener, pluginID string) (*grpc.Server, error) {
+	srv := grpc.NewServer(
+		grpc.MaxRecvMsgSize(maxGRPCMessageSize),
+		grpc.MaxSendMsgSize(maxGRPCMessageSize),
+	)
+	server := &hostServiceServer{pluginID: pluginID, connKey: pluginID}
+	if pluginID != "" {
+		hostServersMu.Lock()
+		hostServers[pluginID] = server
+		hostServersMu.Unlock()
+	}
+	sdkv1.RegisterHostServiceServer(srv, server)
+	go func() { _ = srv.Serve(lis) }()
+	return srv, nil
 }
 
 // hostServiceServer implements sdkv1.HostServiceServer on the host side,

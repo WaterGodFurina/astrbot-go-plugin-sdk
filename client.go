@@ -349,6 +349,22 @@ func (c *Client) setHostServiceServer(srv *grpc.Server, lis net.Listener, server
 	c.hostSrvServer = server
 }
 
+// AttachNativeHostService binds the HostService server the host started for a
+// Native plugin connection (see ServeHostServiceOnListener) to this Client, so
+// Close() stops the server and drops the plugin's host-side state. connKey is
+// the plugin manifest id used at accept time (the key in the hostServers map).
+func (c *Client) AttachNativeHostService(srv *grpc.Server, lis net.Listener, connKey string) {
+	if c == nil || srv == nil {
+		return
+	}
+	hostServersMu.Lock()
+	server := hostServers[connKey]
+	hostServersMu.Unlock()
+	c.hostSrv = srv
+	c.hostLis = lis
+	c.hostSrvServer = server
+}
+
 // ConnTarget returns the gRPC connection target address (diagnostics).
 func (c *Client) ConnTarget() string {
 	if c == nil || c.conn == nil {

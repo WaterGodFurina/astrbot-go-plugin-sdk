@@ -57,6 +57,10 @@ func Serve(p *Plugin) {
 	if p == nil {
 		p = &Plugin{}
 	}
+	// 记录插件配置，供 Native 运行方式使用（main() 在 .so/.dll 加载后不会
+	// 执行，Native 入口 AstrBotNativeServe 通过 sdk.Register 拿到同一份配置）。
+	// gRPC 运行方式下此记录无副作用。
+	Register(p)
 	if p.OnLoad != nil {
 		if err := p.OnLoad(); err != nil {
 			// 与 python-sdk 的 STARTUP_ERROR 协议行一致：单行、可被宿主
@@ -96,6 +100,31 @@ var (
 	logMu         sync.Mutex
 	serviceLogger hclog.Logger
 )
+
+// registeredPlugin 是当前插件配置。gRPC 运行方式由 Serve 直接使用其入参；
+// Native 运行方式（.so/.dll 的 main() 不会执行）依赖 Native 入口
+// AstrBotNativeServe 先调用 Register 存入此全局，再由 NativeServe 读取。
+var (
+	registeredPluginMu sync.RWMutex
+	registeredPlugin   *Plugin
+)
+
+// Register records the plugin configuration so the Native runtime can serve it
+// after the host loads the .so/.dll (whose main() does not run). It is
+// idempotent and safe to call in both runtimes.
+func Register(p *Plugin) {
+	registeredPluginMu.Lock()
+	registeredPlugin = p
+	registeredPluginMu.Unlock()
+}
+
+// currentRegisteredPlugin returns the plugin captured by Register (nil if not
+// set).
+func currentRegisteredPlugin() *Plugin {
+	registeredPluginMu.RLock()
+	defer registeredPluginMu.RUnlock()
+	return registeredPlugin
+}
 
 // singleLine collapses newlines/tabs in s so it can be embedded in the single
 // line [ASTRBOT] STARTUP_ERROR protocol output (mirrors python-sdk).
