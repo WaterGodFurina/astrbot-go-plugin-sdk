@@ -784,7 +784,7 @@ func (s *serviceServer) HandleLLMRequest(_ context.Context, req *sdkv1.HandleLLM
 // ListTools returns the plugin's current LLM function tools. Plugin tools are
 // registered during instantiation (after Register), so this is pulled live on
 // each call instead of being captured in the Register snapshot.
-func (s *serviceServer) ListTools(context.Context, *sdkv1.Empty) (*sdkv1.ListToolsResponse, error) {
+func (s *serviceServer) ListTools(context.Context, *sdkv1.PluginRef) (*sdkv1.ListToolsResponse, error) {
 	resp := &sdkv1.ListToolsResponse{}
 	if s.impl == nil {
 		return resp, nil
@@ -802,7 +802,7 @@ func (s *serviceServer) ListTools(context.Context, *sdkv1.Empty) (*sdkv1.ListToo
 // ListWebApis returns the plugin's current Web API routes. Routes may be
 // registered during instantiation (after Register), so this is pulled live on
 // each call instead of being captured in the Register snapshot.
-func (s *serviceServer) ListWebApis(context.Context, *sdkv1.Empty) (*sdkv1.ListWebApisResponse, error) {
+func (s *serviceServer) ListWebApis(context.Context, *sdkv1.PluginRef) (*sdkv1.ListWebApisResponse, error) {
 	resp := &sdkv1.ListWebApisResponse{}
 	if s.impl == nil {
 		return resp, nil
@@ -903,7 +903,7 @@ func (s *serviceServer) SetLogLevel(_ context.Context, req *sdkv1.SetLogLevelReq
 // GetConfigSchema returns the plugin's CURRENT config schema (JSON). The host
 // pulls it live (e.g. update_manager refreshes runtime schema) and falls back
 // to the Register snapshot when this is empty/unimplemented.
-func (s *serviceServer) GetConfigSchema(context.Context, *sdkv1.Empty) (*sdkv1.GetConfigSchemaResponse, error) {
+func (s *serviceServer) GetConfigSchema(context.Context, *sdkv1.PluginRef) (*sdkv1.GetConfigSchemaResponse, error) {
 	var schema []byte
 	if s.impl != nil {
 		schema = marshalSchema(s.impl.ConfigSchema)
@@ -1122,13 +1122,12 @@ func (s *serviceServer) HandleWebRequest(_ context.Context, req *sdkv1.HandleWeb
 }
 
 // Cleanup invokes the plugin's OnUnload hook.
-func (s *serviceServer) Cleanup(context.Context, *sdkv1.Empty) (*sdkv1.Empty, error) {
+func (s *serviceServer) Cleanup(context.Context, *sdkv1.PluginRef) (*sdkv1.Empty, error) {
 	if s.impl != nil && s.impl.OnUnload != nil {
 		return &sdkv1.Empty{}, s.impl.OnUnload()
 	}
 	return &sdkv1.Empty{}, nil
 }
-
 
 // eventFromStrict 从 proto SDKEvent 还原 Event；nil（协议不匹配/缺事件）直接报错。
 func eventFromStrict(se *sdkv1.SDKEvent) (*Event, error) {
@@ -1137,4 +1136,3 @@ func eventFromStrict(se *sdkv1.SDKEvent) (*Event, error) {
 	}
 	return SDKEventToEvent(se), nil
 }
-

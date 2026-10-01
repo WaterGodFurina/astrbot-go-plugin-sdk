@@ -1,11 +1,11 @@
 package sdk
 
 import (
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"context"
 	"encoding/json"
 	"fmt"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"net"
 	"os"
 	"time"
@@ -206,8 +206,12 @@ func (c *Client) HandleLLMRequest(ctx context.Context, name string, se *sdkv1.SD
 
 // ListWebApis returns the plugin's current Web API routes (pulled live:
 // plugin routes may be registered during instantiation, after Register).
-func (c *Client) ListWebApis(ctx context.Context) ([]*sdkv1.WebApiDesc, error) {
-	resp, err := c.svc.ListWebApis(ctx, &sdkv1.Empty{}, rpcCallOpts...)
+// ref 定位目标插件（共享 Runtime 多租户用 plugin_id；单插件进程可传 nil）。
+func (c *Client) ListWebApis(ctx context.Context, ref *sdkv1.PluginRef) ([]*sdkv1.WebApiDesc, error) {
+	if ref == nil {
+		ref = &sdkv1.PluginRef{}
+	}
+	resp, err := c.svc.ListWebApis(ctx, ref, rpcCallOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -216,8 +220,12 @@ func (c *Client) ListWebApis(ctx context.Context) ([]*sdkv1.WebApiDesc, error) {
 
 // ListTools returns the plugin's current LLM function tools (pulled live:
 // plugin tools are registered during instantiation, after Register).
-func (c *Client) ListTools(ctx context.Context) ([]*sdkv1.ToolDesc, error) {
-	resp, err := c.svc.ListTools(ctx, &sdkv1.Empty{}, rpcCallOpts...)
+// ref 定位目标插件（共享 Runtime 多租户用 plugin_id；单插件进程可传 nil）。
+func (c *Client) ListTools(ctx context.Context, ref *sdkv1.PluginRef) ([]*sdkv1.ToolDesc, error) {
+	if ref == nil {
+		ref = &sdkv1.PluginRef{}
+	}
+	resp, err := c.svc.ListTools(ctx, ref, rpcCallOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -227,8 +235,12 @@ func (c *Client) ListTools(ctx context.Context) ([]*sdkv1.ToolDesc, error) {
 // GetConfigSchema returns the plugin's CURRENT config schema (JSON), which
 // plugins may refresh at runtime. The host falls back to the Register snapshot
 // when this RPC is unimplemented/empty.
-func (c *Client) GetConfigSchema(ctx context.Context) ([]byte, error) {
-	resp, err := c.svc.GetConfigSchema(ctx, &sdkv1.Empty{}, rpcCallOpts...)
+// ref 定位目标插件（共享 Runtime 多租户用 plugin_id；单插件进程可传 nil）。
+func (c *Client) GetConfigSchema(ctx context.Context, ref *sdkv1.PluginRef) ([]byte, error) {
+	if ref == nil {
+		ref = &sdkv1.PluginRef{}
+	}
+	resp, err := c.svc.GetConfigSchema(ctx, ref, rpcCallOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -271,8 +283,12 @@ func (c *Client) HealthCheck(ctx context.Context) (*sdkv1.HealthResponse, error)
 }
 
 // Cleanup tells the plugin to run its unload hook.
-func (c *Client) Cleanup(ctx context.Context) error {
-	_, err := c.svc.Cleanup(ctx, &sdkv1.Empty{}, rpcCallOpts...)
+// ref 定位目标插件（共享 Runtime 多租户用 plugin_id；单插件进程可传 nil）。
+func (c *Client) Cleanup(ctx context.Context, ref *sdkv1.PluginRef) error {
+	if ref == nil {
+		ref = &sdkv1.PluginRef{}
+	}
+	_, err := c.svc.Cleanup(ctx, ref, rpcCallOpts...)
 	return err
 }
 
