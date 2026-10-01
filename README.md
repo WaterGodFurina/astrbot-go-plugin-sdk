@@ -1,6 +1,9 @@
 # AstrBot Go 插件 SDK
 
-为 AstrBot（Go 版）编写插件的 Go SDK。插件以**独立子进程**运行，与宿主通过 gRPC 通信。
+为 AstrBot（Go 版）编写插件的 Go SDK。插件支持两种**运行方式**（宿主侧按插件选择，同一份源码无需修改）：
+
+- **gRPC 子进程（默认）**：插件编译为可执行文件，以独立子进程运行，与宿主通过 gRPC（go-plugin）通信。进程隔离、可独立重启/卸载/闲置休眠。
+- **Native 进程内**：插件编译为进程内动态库（Unix `.so` / Windows `.dll`），与宿主共用进程地址空间，通信复用同一套 P1 protobuf/gRPC（本机回环）。性能更高、内存更省，但**无进程隔离**——崩溃可能影响宿主；更新/禁用/卸载需重启 AstrBot；不支持闲置休眠。
 
 SDK 是独立 module `github.com/WaterGodFurina/AstrBot-go-plugin-sdk`（作为依赖从 GitHub 拉取；开发时本地 clone 到 `~/astrbot-go-plugin-sdk`）。
 
@@ -15,10 +18,16 @@ import (
     sdk "github.com/WaterGodFurina/Astrbot-go-plugin-sdk"
 )
 
+// plugin 是插件定义，必须提升为包级变量（不要内联在 main 里）：
+// gRPC 运行方式由 main 内的 sdk.Serve(plugin) 使用；Native 运行方式下
+// main() 不会执行，宿主构建期注入的 native_entry.go 直接引用该变量并
+// 交给 SDK Native 运行时（sdk.Register + sdk.NativeServe）。
+var plugin = &sdk.Plugin{
+    OnLoad: setup, // 启动钩子，可在里面动态注册
+}
+
 func main() {
-    sdk.Serve(&sdk.Plugin{
-        OnLoad: setup, // 启动钩子，可在里面动态注册
-    })
+    sdk.Serve(plugin)
 }
 ```
 
@@ -34,6 +43,36 @@ func main() {
 ```
 
 插件包（zip/Git 仓库）根目录**必须**包含 `metadata.json` 与 `main.go`，缺任一即安装失败。`cgo` 字段声明该插件是否需要 C 编译器：为空/缺省视为 `false`（纯 Go，`CGO_ENABLED=0`）。
+
+## Native 运行方式
+
+除了默认的 gRPC 子进程，宿主还支持把同一份插件源码构建为**进程内动态库**（Unix `-buildmode=plugin` 出 `.so`，Windows `-buildmode=c-shared` 出 `.dll`）加载到宿主进程。这就是 README 快速开始把 `&sdk.Plugin{...}` 提升为包级 `var plugin` 的原因：
+
+- gRPC 构建：`func main()` 执行 → `sdk.Serve(plugin)`，行为与今天完全一致。
+- Native 构建：`func main()` **不执行**。宿主在编译插件时注入一个生成文件 `native_entry.go`（package main，不改动作者源码），其中调用 `sdk.Register(plugin)` 把包级 `plugin` 交给 SDK，再进入 `sdk.NativeServe()`：
+
+  ```go
+  // native_entry.go（宿主 Native 构建时自动注入，作者无需编写）
+  package main
+
+  import sdk "github.com/WaterGodFurina/Astrbot-go-plugin-sdk"
+
+  func AstrBotNativeServe() int {
+      sdk.Register(plugin) // plugin 为作者源码的包级变量
+      return sdk.NativeServe()
+  }
+  ```
+
+`NativeServe()` 会在本机回环 listener 上启动插件服务（Unix 用 unix socket、Windows 用 `127.0.0.1` TCP），把地址写入宿主指定的 rendezvous 文件，并连接宿主的 HostService（反向调用），随后阻塞服务——**通信仍是同一套 P1 protobuf/gRPC**，插件上层 API 与 gRPC 运行方式完全一致，无需感知运行方式。
+
+> 要求 SDK **v1.7.0+**。宿主按插件选择运行方式（`plugins.json` manifest 的 `runtime` 字段），不写入插件的 `metadata.json`。
+
+### Native 生命周期注意事项
+
+- 动态库加载进宿主进程后**不可卸载、不可安全重载同一路径的新版本**（Go `plugin` 语义）。
+- 因此 Native 插件的重载只做可安全注销/注册的功能刷新（Command / Filter 等）；更新、禁用、卸载后新状态需**重启 AstrBot** 才完整生效。
+- Native 插件**不参与闲置休眠**（无法 kill/唤醒）。
+- Native 插件崩溃或内存问题可能影响宿主主进程——宿主侧会先弹风险警告，用户确认后才切换。
 
 ## 命令
 
@@ -317,6 +356,7 @@ if v, ok := cfg["key"]; ok {
 
 | 函数 | 说明 |
 |---|---|
+| `Register(p *Plugin)` | 记录插件配置（幂等；`Serve` 内部自动调用，Native 入口需要它，gRPC 下无副作用） |
 | `RegisterCommand(cmd Command)` | 注册命令 |
 | `RegisterFilter(f Filter)` | 注册过滤器 |
 | `RegisterHook(h Hook)` | 注册钩子 |
