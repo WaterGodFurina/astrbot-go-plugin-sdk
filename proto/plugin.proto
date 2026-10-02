@@ -101,6 +101,16 @@ service PluginService {
   // 注册、payload 带 _plugin_id），插件执行注册的 handler；无匹配 handler
   // 返回 handled=false（对齐 FeedSessionWait 语义）。
   rpc FeedCronJob(FeedCronJobRequest) returns (FeedCronJobResponse);
+  // ManagePlugin（python-shared 共享 Runtime 多租户）管理共享进程内的插件
+  // 成员，使 Go Runtime Manager 能在不重启整个 Runtime 的前提下按插件
+  // 加载/卸载（对齐方案「Unload/Reload → 通知 Runtime 卸载单插件，非杀
+  // 进程」）：
+  //   action="load"：登记并 import 插件（等价单插件 server.py 的阶段 A），
+  //     随后宿主对同一 plugin_id 调 Register 触发实例化；
+  //   action="unload"：卸载单个插件（terminate + 清理 session），不影响
+  //     共享 Runtime 内其它插件。
+  // 单插件进程（python-grpc / python-isolated）不使用，返回 UNIMPLEMENTED。
+  rpc ManagePlugin(ManagePluginRequest) returns (ManagePluginResponse);
 }
 
 // HostService is served by the HOST and dialed by plugins for reverse calls.
@@ -423,6 +433,26 @@ message RegisterRequest {
   string plugin_id = 2;
 }
 
+// ManagePluginRequest 管理共享 Runtime（python-shared）内的插件成员。
+message ManagePluginRequest {
+  // "load" | "unload"。
+  string action = 1;
+  // 宿主分配的目标插件 id（python-shared 下为 manifest id）。
+  string plugin_id = 2;
+  // action="load" 时的插件源码目录（绝对路径）；unload 可留空。
+  string plugin_dir = 3;
+  // 插件显示名 / 版本（可选，仅日志与占位；实际以 Register 上报为准）。
+  string plugin_name = 4;
+  string version = 5;
+}
+
+// ManagePluginResponse 返回管理操作结果。error 非空表示失败（宿主保留该
+// 插件为 ERROR 状态，不影响共享 Runtime 内其它插件）。
+message ManagePluginResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
 // SetLogLevelRequest carries the desired log level name
 // (DEBUG/INFO/WARNING/ERROR/CRITICAL) or "" to follow the host's global level.
 message SetLogLevelRequest {
@@ -626,6 +656,10 @@ message HealthResponse {
   // 下 plugins 含 1 个元素（自身）；共享 Runtime（python-shared）下含其承载的
   // 全部插件。旧 SDK 不含该字段 → 空，Go 回退既有状态。
   repeated PluginStatus plugins = 4;
+  // Runtime 心跳时间戳（Unix 秒；0 = 未上报/旧 SDK）。Runtime 主循环周期刷新，
+  // 供 Go 侧判断 Runtime 是否卡死（连接存活但心跳停滞 = 疑似 hang，方案第 6 节
+  // 「Go 只判断 Runtime 连接状态」的补充）。进程级崩溃检测仍由 Go 负责。
+  double runtime_heartbeat = 5;
 }
 
 // PluginStatus 是单个 Python 插件的状态镜像单元（对齐方案文档第五节）。

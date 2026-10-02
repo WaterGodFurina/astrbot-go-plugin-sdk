@@ -607,7 +607,7 @@ func (h *host) DeleteSkill(name string) error {
 }
 
 // GetPlatformMessageHistory 按平台/用户取最近 limit 条平台消息记录
-//（强类型 PMHistoryRecord）。
+// （强类型 PMHistoryRecord）。
 func (h *host) GetPlatformMessageHistory(platformID, userID string, limit int32) ([]PMHistoryRecord, error) {
 	svc, err := hostServiceClient()
 	if err != nil {
@@ -650,12 +650,12 @@ func (h *host) InsertPlatformMessageHistory(platformID, userID, senderID string,
 	ctx, cancel := hostRPCCtx()
 	defer cancel()
 	resp, err := svc.InsertPlatformMessageHistory(ctx, &sdkv1.InsertPMHistoryRequest{
-		PlatformId:       platformID,
-		UserId:           userID,
-		SenderId:         senderID,
-		ContentJson:      contentJSON,
-		LlmCheckpointId:  llmCheckpointID,
-		MaxMessages:      maxMessages,
+		PlatformId:      platformID,
+		UserId:          userID,
+		SenderId:        senderID,
+		ContentJson:     contentJSON,
+		LlmCheckpointId: llmCheckpointID,
+		MaxMessages:     maxMessages,
 	})
 	if err != nil {
 		return PMHistoryRecord{}, err
@@ -734,7 +734,7 @@ func (h *host) ListSkillsV2(activeOnly bool, runtime string, showSandboxPath boo
 }
 
 // KBRetrieve 检索宿主知识库：返回拼接后的上下文文本与结果 JSON 数组
-//（无命中时 context_text 为空、results_json 为 "[]"）。可经
+// （无命中时 context_text 为空、results_json 为 "[]"）。可经
 // ParseKBSearchResults 解析为强类型切片。kbNames 为空 = 宿主全部知识库。
 func (h *host) KBRetrieve(query string, kbNames []string, topKFusion, topMFinal int) (string, string, error) {
 	svc, err := hostServiceClient()
@@ -761,7 +761,7 @@ func (h *host) KBRetrieve(query string, kbNames []string, topKFusion, topMFinal 
 }
 
 // KBUploadFromURL 让宿主从 URL 拉取文档写入指定知识库并分块
-//（chunkSize/chunkOverlap <=0 用宿主默认；kbNameOrID 为知识库名或 ID）。
+// （chunkSize/chunkOverlap <=0 用宿主默认；kbNameOrID 为知识库名或 ID）。
 func (h *host) KBUploadFromURL(kbNameOrID, url string, chunkSize, chunkOverlap int) error {
 	svc, err := hostServiceClient()
 	if err != nil {
@@ -1391,6 +1391,63 @@ func (s *hostServiceServer) connectionID() string {
 	return s.pluginID
 }
 
+// SharedRuntimeConnKey 是共享 Runtime（python-shared）连接的 connKey 哨兵值：
+// 一个进程承载 N 个插件，连接级身份不能代表某个具体插件，故身份改为按
+// **请求**携带的 plugin_name 经宿主注入的解析器（SetSharedPluginResolver）
+// 解析为 manifest id（方案第 4/8 节「身份绑定由 per-connection 改为
+// per-request/per-session」）。
+const SharedRuntimeConnKey = "__shared_runtime__"
+
+var (
+	sharedResolverMu sync.RWMutex
+	// sharedPluginResolver 把共享 Runtime 反调用携带的插件注册名解析为
+	// manifest id；由宿主注入（pluginConfigID）。返回 "" 表示无法唯一解析
+	// （fail-closed）。
+	sharedPluginResolver func(string) string
+)
+
+// SetSharedPluginResolver 注入共享 Runtime 的「注册名 → manifest id」解析器。
+// 仅在宿主托管 python-shared 时设置；单插件进程不需要。
+func SetSharedPluginResolver(fn func(string) string) {
+	sharedResolverMu.Lock()
+	sharedPluginResolver = fn
+	sharedResolverMu.Unlock()
+}
+
+// isSharedConn 报告本连接是否为共享 Runtime（多租户）。
+func (s *hostServiceServer) isSharedConn() bool {
+	return s.connKey == SharedRuntimeConnKey
+}
+
+// authID 返回用于管理鉴权 / 配置归属的 manifest id：
+//   - 单插件连接：连接绑定的 manifest id（connKey）；
+//   - 共享 Runtime：按请求 plugin_name 经宿主解析器解析（per-request）；
+//     解析失败返回 ""（fail-closed，拒绝）。
+func (s *hostServiceServer) authID(pluginName string) string {
+	if s.isSharedConn() {
+		sharedResolverMu.RLock()
+		fn := sharedPluginResolver
+		sharedResolverMu.RUnlock()
+		if fn == nil {
+			return ""
+		}
+		return fn(pluginName)
+	}
+	return s.connectionID()
+}
+
+// ownsConfig 报告本连接是否有权读写 pluginName 的配置。
+//   - 单插件连接：注册名必须与连接身份一致（严格）；
+//   - 共享 Runtime：连接承载多插件，无法从连接判定调用方，退化为「目标名能
+//     解析为已知 manifest id 即放行」。这是共享模式的**已知隔离损失**（方案
+//     第 7 节：共享进程无进程级隔离）；需要严格配置隔离的插件应走 python-grpc。
+func (s *hostServiceServer) ownsConfig(pluginName string) bool {
+	if s.isSharedConn() {
+		return s.authID(pluginName) != ""
+	}
+	return pluginName == s.identity()
+}
+
 // hostPluginID is the id of the plugin the host is currently establishing a
 // connection for. The host sets it (SetCurrentHostPluginID) right before
 // go-plugin Dispense; acceptHostService reads it so the per-connection
@@ -1571,7 +1628,7 @@ func (s *hostServiceServer) GetConfig(_ context.Context, req *sdkv1.GetConfigReq
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
-	if req.PluginName != s.identity() {
+	if !s.ownsConfig(req.PluginName) {
 		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权读取插件 %q 的配置", s.identity(), req.PluginName)
 	}
 	h := getHostHooks()
@@ -1595,7 +1652,7 @@ func (s *hostServiceServer) SetConfig(_ context.Context, req *sdkv1.SetConfigReq
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
-	if req.PluginName != s.identity() {
+	if !s.ownsConfig(req.PluginName) {
 		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权修改插件 %q 的配置", s.identity(), req.PluginName)
 	}
 	h := getHostHooks()
@@ -2044,7 +2101,7 @@ func (s *hostServiceServer) SetPluginEnabled(_ context.Context, req *sdkv1.SetPl
 	// 目标校验：插件只能启停自身（按注册名比对 s.identity()），操作其他插件
 	// 须在管理员名单内。管理鉴权以连接绑定的 manifest id（connectionID）为键，
 	// 注册名重名无法冒充（26-2 / p11）。
-	if req.PluginName != s.identity() && !hostAdminAuthorized(s.connectionID()) {
+	if !s.ownsConfig(req.PluginName) && !hostAdminAuthorized(s.connectionID()) {
 		return nil, status.Errorf(codes.PermissionDenied,
 			"插件 %q 无权操作插件 %q（仅允许操作自身，或经宿主授权的管理插件）", s.identity(), req.PluginName)
 	}
@@ -2613,7 +2670,7 @@ func (s *hostServiceServer) CronRunNow(_ context.Context, req *sdkv1.CronRunNowR
 }
 
 // McpListTools 汇总宿主已连接 MCP server 的全部工具
-//（每项 {server, name, description, schema_json}）。
+// （每项 {server, name, description, schema_json}）。
 func (s *hostServiceServer) McpListTools(_ context.Context, _ *sdkv1.Empty) (*sdkv1.McpToolsResponse, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
@@ -2692,7 +2749,7 @@ func SetPluginAdminList(ids []string) {
 }
 
 // hostAdminAuthorized 报告给定 manifest id 是否在管理员名单中。按 id 精确匹配
-//（大小写敏感、不 trim、不做子串），避免模糊匹配放大授权面。
+// （大小写敏感、不 trim、不做子串），避免模糊匹配放大授权面。
 func hostAdminAuthorized(pluginID string) bool {
 	hostAdminListMu.RLock()
 	defer hostAdminListMu.RUnlock()

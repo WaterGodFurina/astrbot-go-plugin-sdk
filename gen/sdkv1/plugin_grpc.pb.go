@@ -73,6 +73,7 @@ const (
 	PluginService_GetConfigSchema_FullMethodName  = "/astrbot.sdk.v1.PluginService/GetConfigSchema"
 	PluginService_Cleanup_FullMethodName          = "/astrbot.sdk.v1.PluginService/Cleanup"
 	PluginService_FeedCronJob_FullMethodName      = "/astrbot.sdk.v1.PluginService/FeedCronJob"
+	PluginService_ManagePlugin_FullMethodName     = "/astrbot.sdk.v1.PluginService/ManagePlugin"
 )
 
 // PluginServiceClient is the client API for PluginService service.
@@ -138,6 +139,18 @@ type PluginServiceClient interface {
 	// 注册、payload 带 _plugin_id），插件执行注册的 handler；无匹配 handler
 	// 返回 handled=false（对齐 FeedSessionWait 语义）。
 	FeedCronJob(ctx context.Context, in *FeedCronJobRequest, opts ...grpc.CallOption) (*FeedCronJobResponse, error)
+	// ManagePlugin（python-shared 共享 Runtime 多租户）管理共享进程内的插件
+	// 成员，使 Go Runtime Manager 能在不重启整个 Runtime 的前提下按插件
+	// 加载/卸载（对齐方案「Unload/Reload → 通知 Runtime 卸载单插件，非杀
+	// 进程」）：
+	//
+	//	action="load"：登记并 import 插件（等价单插件 server.py 的阶段 A），
+	//	  随后宿主对同一 plugin_id 调 Register 触发实例化；
+	//	action="unload"：卸载单个插件（terminate + 清理 session），不影响
+	//	  共享 Runtime 内其它插件。
+	//
+	// 单插件进程（python-grpc / python-isolated）不使用，返回 UNIMPLEMENTED。
+	ManagePlugin(ctx context.Context, in *ManagePluginRequest, opts ...grpc.CallOption) (*ManagePluginResponse, error)
 }
 
 type pluginServiceClient struct {
@@ -298,6 +311,16 @@ func (c *pluginServiceClient) FeedCronJob(ctx context.Context, in *FeedCronJobRe
 	return out, nil
 }
 
+func (c *pluginServiceClient) ManagePlugin(ctx context.Context, in *ManagePluginRequest, opts ...grpc.CallOption) (*ManagePluginResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ManagePluginResponse)
+	err := c.cc.Invoke(ctx, PluginService_ManagePlugin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PluginServiceServer is the server API for PluginService service.
 // All implementations must embed UnimplementedPluginServiceServer
 // for forward compatibility.
@@ -361,6 +384,18 @@ type PluginServiceServer interface {
 	// 注册、payload 带 _plugin_id），插件执行注册的 handler；无匹配 handler
 	// 返回 handled=false（对齐 FeedSessionWait 语义）。
 	FeedCronJob(context.Context, *FeedCronJobRequest) (*FeedCronJobResponse, error)
+	// ManagePlugin（python-shared 共享 Runtime 多租户）管理共享进程内的插件
+	// 成员，使 Go Runtime Manager 能在不重启整个 Runtime 的前提下按插件
+	// 加载/卸载（对齐方案「Unload/Reload → 通知 Runtime 卸载单插件，非杀
+	// 进程」）：
+	//
+	//	action="load"：登记并 import 插件（等价单插件 server.py 的阶段 A），
+	//	  随后宿主对同一 plugin_id 调 Register 触发实例化；
+	//	action="unload"：卸载单个插件（terminate + 清理 session），不影响
+	//	  共享 Runtime 内其它插件。
+	//
+	// 单插件进程（python-grpc / python-isolated）不使用，返回 UNIMPLEMENTED。
+	ManagePlugin(context.Context, *ManagePluginRequest) (*ManagePluginResponse, error)
 	mustEmbedUnimplementedPluginServiceServer()
 }
 
@@ -415,6 +450,9 @@ func (UnimplementedPluginServiceServer) Cleanup(context.Context, *PluginRef) (*E
 }
 func (UnimplementedPluginServiceServer) FeedCronJob(context.Context, *FeedCronJobRequest) (*FeedCronJobResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method FeedCronJob not implemented")
+}
+func (UnimplementedPluginServiceServer) ManagePlugin(context.Context, *ManagePluginRequest) (*ManagePluginResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ManagePlugin not implemented")
 }
 func (UnimplementedPluginServiceServer) mustEmbedUnimplementedPluginServiceServer() {}
 func (UnimplementedPluginServiceServer) testEmbeddedByValue()                       {}
@@ -707,6 +745,24 @@ func _PluginService_FeedCronJob_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PluginService_ManagePlugin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ManagePluginRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).ManagePlugin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_ManagePlugin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).ManagePlugin(ctx, req.(*ManagePluginRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PluginService_ServiceDesc is the grpc.ServiceDesc for PluginService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -773,6 +829,10 @@ var PluginService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FeedCronJob",
 			Handler:    _PluginService_FeedCronJob_Handler,
+		},
+		{
+			MethodName: "ManagePlugin",
+			Handler:    _PluginService_ManagePlugin_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

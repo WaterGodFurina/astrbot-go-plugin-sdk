@@ -65,6 +65,14 @@ type Client struct {
 	conn *grpc.ClientConn
 	svc  sdkv1.PluginServiceClient
 
+	// pluginID 是多租户（python-shared 共享 Runtime）下本次调用目标插件的
+	// plugin_id；单插件进程为空。经 ForPlugin(id) 派生 per-plugin 视图后，
+	// 所有带 plugin_id 字段的 RPC 自动填充它，宿主调用点无需改动。
+	pluginID string
+	// ownsConn 标记本 Client 是否拥有底层连接（Close 时是否关闭）。ForPlugin
+	// 派生的共享视图 ownsConn=false，避免单个插件卸载关闭整个共享 Runtime。
+	ownsConn bool
+
 	// hostSrv/hostLis are the HostService gRPC server the host serves on the
 	// broker for this plugin. They are stopped by Close() so reloading a plugin
 	// does not leak the listener or its serving goroutine.
@@ -78,14 +86,41 @@ type Client struct {
 // NewClient wraps an existing gRPC connection.
 func NewClient(conn *grpc.ClientConn) *Client {
 	return &Client{
-		conn: conn,
-		svc:  sdkv1.NewPluginServiceClient(conn),
+		conn:     conn,
+		svc:      sdkv1.NewPluginServiceClient(conn),
+		ownsConn: true,
 	}
+}
+
+// ForPlugin 派生一个绑定 plugin_id 的共享视图（python-shared 多租户）：
+// 复用同一 gRPC 连接，之后所有 PluginService 调用自动携带该 plugin_id，
+// 宿主无需逐调用点改签名。Close() 不会关闭共享连接（ownsConn=false）。
+func (c *Client) ForPlugin(pluginID string) *Client {
+	if c == nil {
+		return nil
+	}
+	if pluginID == "" {
+		return c
+	}
+	return &Client{
+		conn:     c.conn,
+		svc:      c.svc,
+		pluginID: pluginID,
+		ownsConn: false,
+	}
+}
+
+// PluginID 返回该 Client 视图绑定的 plugin_id（单插件进程为空）。
+func (c *Client) PluginID() string {
+	if c == nil {
+		return ""
+	}
+	return c.pluginID
 }
 
 // Register fetches the plugin's metadata and handler descriptors.
 func (c *Client) Register(ctx context.Context) (*sdkv1.RegisterResponse, error) {
-	resp, err := c.svc.Register(ctx, &sdkv1.RegisterRequest{ProtocolVersion: P1ProtocolVersion}, rpcCallOpts...)
+	resp, err := c.svc.Register(ctx, &sdkv1.RegisterRequest{ProtocolVersion: P1ProtocolVersion, PluginId: c.pluginID}, rpcCallOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -124,9 +159,10 @@ func (c *Client) HandleCommand(ctx context.Context, name string, args []string, 
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 	resp, err := c.svc.HandleCommand(ctx, &sdkv1.HandleCommandRequest{
-		Name:  name,
-		Args:  args,
-		Event: se,
+		Name:     name,
+		Args:     args,
+		Event:    se,
+		PluginId: c.pluginID,
 	}, rpcCallOpts...)
 	if err != nil {
 		return "", nil, &sdkv1.EventResult{}, err
@@ -140,7 +176,7 @@ func (c *Client) HandleCommand(ctx context.Context, name string, args []string, 
 func (c *Client) HandleFilter(ctx context.Context, name string, se *sdkv1.SDKEvent) (bool, *sdkv1.EventResult, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	resp, err := c.svc.HandleFilter(ctx, &sdkv1.HandleFilterRequest{Name: name, Event: se}, rpcCallOpts...)
+	resp, err := c.svc.HandleFilter(ctx, &sdkv1.HandleFilterRequest{Name: name, Event: se, PluginId: c.pluginID}, rpcCallOpts...)
 	if err != nil {
 		return true, &sdkv1.EventResult{}, err
 	}
@@ -173,7 +209,7 @@ func (c *Client) handleHook(ctx context.Context, name string, se *sdkv1.SDKEvent
 			return chain, false, &sdkv1.EventResult{}, err
 		}
 	}
-	resp, err := c.svc.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: name, Event: se, Chain: componentsToProto(chain), PayloadJson: payloadJSON}, rpcCallOpts...)
+	resp, err := c.svc.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: name, Event: se, Chain: componentsToProto(chain), PayloadJson: payloadJSON, PluginId: c.pluginID}, rpcCallOpts...)
 	if err != nil {
 		return chain, false, &sdkv1.EventResult{}, err
 	}
@@ -196,6 +232,7 @@ func (c *Client) HandleLLMRequest(ctx context.Context, name string, se *sdkv1.SD
 		Event:        se,
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
+		PluginId:     c.pluginID,
 	}, rpcCallOpts...)
 	if err != nil {
 		return systemPrompt, userPrompt, false, &sdkv1.EventResult{}, err
@@ -209,7 +246,7 @@ func (c *Client) HandleLLMRequest(ctx context.Context, name string, se *sdkv1.SD
 // ref 定位目标插件（共享 Runtime 多租户用 plugin_id；单插件进程可传 nil）。
 func (c *Client) ListWebApis(ctx context.Context, ref *sdkv1.PluginRef) ([]*sdkv1.WebApiDesc, error) {
 	if ref == nil {
-		ref = &sdkv1.PluginRef{}
+		ref = &sdkv1.PluginRef{PluginId: c.pluginID}
 	}
 	resp, err := c.svc.ListWebApis(ctx, ref, rpcCallOpts...)
 	if err != nil {
@@ -223,7 +260,7 @@ func (c *Client) ListWebApis(ctx context.Context, ref *sdkv1.PluginRef) ([]*sdkv
 // ref 定位目标插件（共享 Runtime 多租户用 plugin_id；单插件进程可传 nil）。
 func (c *Client) ListTools(ctx context.Context, ref *sdkv1.PluginRef) ([]*sdkv1.ToolDesc, error) {
 	if ref == nil {
-		ref = &sdkv1.PluginRef{}
+		ref = &sdkv1.PluginRef{PluginId: c.pluginID}
 	}
 	resp, err := c.svc.ListTools(ctx, ref, rpcCallOpts...)
 	if err != nil {
@@ -238,7 +275,7 @@ func (c *Client) ListTools(ctx context.Context, ref *sdkv1.PluginRef) ([]*sdkv1.
 // ref 定位目标插件（共享 Runtime 多租户用 plugin_id；单插件进程可传 nil）。
 func (c *Client) GetConfigSchema(ctx context.Context, ref *sdkv1.PluginRef) ([]byte, error) {
 	if ref == nil {
-		ref = &sdkv1.PluginRef{}
+		ref = &sdkv1.PluginRef{PluginId: c.pluginID}
 	}
 	resp, err := c.svc.GetConfigSchema(ctx, ref, rpcCallOpts...)
 	if err != nil {
@@ -261,6 +298,7 @@ func (c *Client) HandleTool(ctx context.Context, name string, args map[string]an
 		Name:     name,
 		ArgsJson: argsJSON,
 		Event:    se,
+		PluginId: c.pluginID,
 	}, rpcCallOpts...)
 	if err != nil {
 		return "", false, &sdkv1.EventResult{}, err
@@ -274,6 +312,9 @@ func (c *Client) HandleTool(ctx context.Context, name string, args map[string]an
 func (c *Client) HandleWebRequest(ctx context.Context, req *sdkv1.HandleWebRequestRequest) (*sdkv1.HandleWebRequestResponse, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
+	if req != nil && req.PluginId == "" {
+		req.PluginId = c.pluginID
+	}
 	return c.svc.HandleWebRequest(ctx, req, rpcCallOpts...)
 }
 
@@ -286,7 +327,7 @@ func (c *Client) HealthCheck(ctx context.Context) (*sdkv1.HealthResponse, error)
 // ref 定位目标插件（共享 Runtime 多租户用 plugin_id；单插件进程可传 nil）。
 func (c *Client) Cleanup(ctx context.Context, ref *sdkv1.PluginRef) error {
 	if ref == nil {
-		ref = &sdkv1.PluginRef{}
+		ref = &sdkv1.PluginRef{PluginId: c.pluginID}
 	}
 	_, err := c.svc.Cleanup(ctx, ref, rpcCallOpts...)
 	return err
@@ -297,7 +338,7 @@ func (c *Client) Cleanup(ctx context.Context, ref *sdkv1.PluginRef) error {
 // global level. Old plugin binaries (compiled against a proto without this
 // RPC) return UNIMPLEMENTED — the caller should treat that as success.
 func (c *Client) SetLogLevel(ctx context.Context, level string) error {
-	_, err := c.svc.SetLogLevel(ctx, &sdkv1.SetLogLevelRequest{Level: level}, rpcCallOpts...)
+	_, err := c.svc.SetLogLevel(ctx, &sdkv1.SetLogLevelRequest{Level: level, PluginId: c.pluginID}, rpcCallOpts...)
 	return err
 }
 
@@ -308,11 +349,24 @@ func (c *Client) SetLogLevel(ctx context.Context, level string) error {
 func (c *Client) FeedSessionWait(ctx context.Context, se *sdkv1.SDKEvent) (bool, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	resp, err := c.svc.FeedSessionWait(ctx, &sdkv1.FeedSessionWaitRequest{Event: se}, rpcCallOpts...)
+	resp, err := c.svc.FeedSessionWait(ctx, &sdkv1.FeedSessionWaitRequest{Event: se, PluginId: c.pluginID}, rpcCallOpts...)
 	if err != nil {
 		return false, err
 	}
 	return resp.GetHandled(), nil
+}
+
+// ManagePlugin 管理共享 Runtime（python-shared）内的插件成员：action="load"
+// 加载/登记插件（随后对同一 plugin_id 调 Register 触发实例化），
+// action="unload" 卸载单个插件（不杀共享 Runtime 进程）。单插件进程返回
+// UNIMPLEMENTED；宿主应只对共享 Runtime 调用。
+func (c *Client) ManagePlugin(ctx context.Context, req *sdkv1.ManagePluginRequest) (*sdkv1.ManagePluginResponse, error) {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
+	if req != nil && req.PluginId == "" {
+		req.PluginId = c.pluginID
+	}
+	return c.svc.ManagePlugin(ctx, req, rpcCallOpts...)
 }
 
 // FeedCronJob pushes a cron trigger to the plugin so the handler of a basic
@@ -323,6 +377,9 @@ func (c *Client) FeedSessionWait(ctx context.Context, se *sdkv1.SDKEvent) (bool,
 func (c *Client) FeedCronJob(ctx context.Context, req *sdkv1.FeedCronJobRequest) (*sdkv1.FeedCronJobResponse, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
+	if req != nil && req.PluginId == "" {
+		req.PluginId = c.pluginID
+	}
 	return c.svc.FeedCronJob(ctx, req, rpcCallOpts...)
 }
 
@@ -350,7 +407,7 @@ func (c *Client) Close() error {
 		dropPluginHostState(c.hostSrvServer.connKey, c.hostSrvServer)
 		c.hostSrvServer = nil
 	}
-	if c.conn != nil {
+	if c.ownsConn && c.conn != nil {
 		return c.conn.Close()
 	}
 	return nil
