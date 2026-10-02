@@ -621,6 +621,28 @@ message HealthResponse {
   bool ok = 1;
   double load = 2;
   string version = 3;
+  // 插件状态上报（板块 5：Python → Go 状态镜像）。Python Runtime 是 Python
+  // 插件生命周期/健康状态的权威来源，Go 只做镜像。单插件进程（python-grpc）
+  // 下 plugins 含 1 个元素（自身）；共享 Runtime（python-shared）下含其承载的
+  // 全部插件。旧 SDK 不含该字段 → 空，Go 回退既有状态。
+  repeated PluginStatus plugins = 4;
+}
+
+// PluginStatus 是单个 Python 插件的状态镜像单元（对齐方案文档第五节）。
+message PluginStatus {
+  string plugin_id = 1;
+  string plugin_name = 2;
+  // 生命周期状态：LOADING / ACTIVE / IDLE / SLEEPING / UNLOADED / ERROR
+  string state = 3;
+  // 健康状态：NORMAL / DEGRADED / UNHEALTHY / ISOLATION_PENDING /
+  // ISOLATED / RECOVERY_PENDING / REMOVED（Python Watchdog 判定）
+  string health = 4;
+  // 最近活动时间（Unix 秒；0 = 未知）
+  double last_activity = 5;
+  // 错误信息（无错误为空串）
+  string error = 6;
+  // 实例代际（每次 reload +1，防止旧实例消息污染）
+  int64 generation = 7;
 }
 
 // --- HostService payloads --------------------------------------------------
