@@ -245,7 +245,7 @@ func (p *Plugin) RegisterSessionWait(umo string, timeoutSec int, handler func(e 
 	p.sessionWaitsMu.Unlock()
 
 	// 反向告知宿主注册等待；失败时打 Warn（宿主不支持该特性时返回空 wait_id）。
-	if svc, err := hostServiceClient(); err != nil {
+	if svc, err := hostServiceCaller(); err != nil {
 		logService().Warn("RegisterSessionWait 无法连接宿主 HostService，等待可能永远不会触发（是否在 OnLoad 中过早注册？）",
 			"umo", umo, "err", err)
 	} else {
@@ -276,7 +276,7 @@ func (p *Plugin) UnregisterSessionWait(umo string) {
 	if w != nil && w.WaitID != "" {
 		waitID = w.WaitID
 	}
-	if svc, err := hostServiceClient(); err == nil {
+	if svc, err := hostServiceCaller(); err == nil {
 		ctx, cancel := hostRPCCtx()
 		defer cancel()
 		if _, rerr := svc.UnregisterSessionWait(ctx, &sdkv1.UnregisterSessionWaitRequest{WaitId: waitID}); rerr != nil {

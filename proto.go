@@ -82,6 +82,13 @@ func SDKEventToEvent(se *sdkv1.SDKEvent) *Event {
 	return e
 }
 
+// ComponentsToProto / ProtoToComponents are exported for the gRPC transport;
+// the core service layer uses the unexported helpers below internally.
+func ComponentsToProto(chain []Component) []*sdkv1.Component { return componentsToProto(chain) }
+
+// ProtoToComponents is the exported inverse of ComponentsToProto.
+func ProtoToComponents(comps []*sdkv1.Component) []Component { return protoToComponents(comps) }
+
 // componentsToProto 把 SDK Component 切片转成 proto Component。
 // 媒体 Base64 转 bytes base64_data；Json 卡片 Data 保留 data_json；
 // Reply 引用消息携带 sender_*/chain（嵌套，带深度上限）。

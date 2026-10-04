@@ -9,8 +9,6 @@ import (
 	"testing"
 
 	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -247,7 +245,7 @@ func TestP1NativeEventRoundTrip(t *testing.T) {
 func TestP1ProtocolNegotiationMismatch(t *testing.T) {
 	srv := &serviceServer{impl: &Plugin{Name: "p"}}
 	_, err := srv.Register(context.Background(), &sdkv1.RegisterRequest{ProtocolVersion: 0})
-	if status.Code(err) != codes.FailedPrecondition {
+	if CodeOf(err) != CodeFailedPrecondition {
 		t.Fatalf("want FailedPrecondition on version mismatch, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "protocol version mismatch") {

@@ -9,7 +9,7 @@ import (
 )
 
 // TestSkillsHistoryRoundTrip 验证 skills + platform-message-history RPC 的
-// 往返：宿主侧 SetHostHooks mock 提供数据 → hostServiceServer 处理 proto
+// 往返：宿主侧 SetHostHooks mock 提供数据 → HostServiceServer 处理 proto
 // 请求 → 强类型解码（SkillInfo / PMHistoryRecord 字段与宿主/Python SDK 对齐）。
 //
 // 不直接调用 Host.* 客户端方法（它们需要 go-plugin broker 的联网通道）；
@@ -87,7 +87,7 @@ func TestSkillsHistoryRoundTrip(t *testing.T) {
 		},
 	})
 
-	srv := &hostServiceServer{pluginID: "test_plugin_skills"}
+	srv := &HostServiceServer{pluginID: "test_plugin_skills"}
 
 	// ListSkills RPC → 强类型解码
 	resp, err := srv.ListSkills(context.Background(), &sdkv1.Empty{})

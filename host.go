@@ -5,18 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"net"
-	"os"
 	"sync"
 	"time"
 
 	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
-	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/go-plugin"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/status"
 )
 
 // HostServiceAppID is the go-plugin broker AppID of the host's HostService.
@@ -25,165 +17,27 @@ import (
 const HostServiceAppID uint32 = 9000
 
 // ---------------------------------------------------------------------------
-// Plugin side: dialing the host's HostService over the broker.
+// Plugin side: reverse calls into the host's HostService.
+//
+// Core is transport-agnostic: a transport installs hostCallerFn (gRPC dials the
+// go-plugin broker; Native returns an in-process HostServiceServer). This keeps
+// google.golang.org/grpc out of Native plugin builds.
 // ---------------------------------------------------------------------------
 
-var (
-	brokerMu sync.RWMutex
-	broker   *plugin.GRPCBroker
+var hostCallerFn func() (HostService, error)
 
-	hostMu       sync.Mutex
-	hostSvc      sdkv1.HostServiceClient
-	hostConn     *grpc.ClientConn
-	hostDialDone bool
+// SetHostCallerFunc installs the transport's plugin->host caller factory.
+func SetHostCallerFunc(fn func() (HostService, error)) { hostCallerFn = fn }
 
-	// hostDialMu 串行化实际拨号过程。hostMu 只保护缓存读写，拨号期间不持
-	// 锁：否则一次卡住的 Dial 会让所有反调方在锁上排队，把单点超时放大成
-	// 全局停摆。
-	hostDialMu sync.Mutex
-)
-
-// nativeHostTarget 是 Native 运行方式下宿主 HostService 的 gRPC target
-// （由 serve_native.go 在 NativeServe 里经 setNativeHostTarget 设置）。
-// gRPC（go-plugin）运行方式下恒为空，hostServiceClient 走 broker 路径。
-var (
-	nativeHostTargetMu sync.RWMutex
-	nativeHostTarget   string
-)
-
-// setNativeHostTarget 记录宿主 HostService 的 gRPC target，供 Native 运行
-// 方式的反向调用使用（本文件在两种运行方式下都编译，仅 Native 设置）。
-func setNativeHostTarget(target string) {
-	nativeHostTargetMu.Lock()
-	nativeHostTarget = target
-	nativeHostTargetMu.Unlock()
+// hostServiceCaller returns the plugin's reverse-call client.
+func hostServiceCaller() (HostService, error) {
+	if hostCallerFn == nil {
+		return nil, errNoHostCaller
+	}
+	return hostCallerFn()
 }
 
-// nativeHostTargetValue 返回宿主 HostService target；gRPC 运行方式下为空串。
-func nativeHostTargetValue() string {
-	nativeHostTargetMu.RLock()
-	defer nativeHostTargetMu.RUnlock()
-	return nativeHostTarget
-}
-
-// setBroker stores the go-plugin broker handed to GRPCServer so handlers can
-// dial the host lazily.
-func setBroker(b *plugin.GRPCBroker) {
-	brokerMu.Lock()
-	defer brokerMu.Unlock()
-	broker = b
-	// Broker may be re-provisioned (plugin serving restarts); reset cached conn.
-	hostMu.Lock()
-	// hostConn 是 *grpc.ClientConn，自带 Close()。重建 broker 时先关闭旧
-	// 连接再丢弃引用，避免底层 gRPC 连接与 goroutine 泄漏。
-	if hostConn != nil {
-		_ = hostConn.Close()
-	}
-	hostConn = nil
-	hostSvc = nil
-	hostDialDone = false
-	hostMu.Unlock()
-}
-
-func hostServiceClient() (sdkv1.HostServiceClient, error) {
-	// Native 运行方式：宿主 HostService 经 setNativeHostTarget 直接给出
-	// gRPC target，不走 go-plugin broker。
-	if t := nativeHostTargetValue(); t != "" {
-		return dialNativeHostService(t)
-	}
-
-	// 先在 brokerMu 内取出 broker 引用并立即释放读取锁，再进入 hostMu。
-	// 避免与 setBroker（brokerMu → hostMu 嵌套）构成 AB-BA 死锁：本函数
-	// 在取得 hostMu 前已释放 brokerMu，任何时刻都不嵌套持有两把锁。
-	brokerMu.RLock()
-	b := broker
-	brokerMu.RUnlock()
-	if b == nil {
-		return nil, errNoBroker
-	}
-
-	// 先查缓存（只读路径不持拨号锁，命中时零开销）。
-	hostMu.Lock()
-	if hostDialDone && hostSvc != nil {
-		svc := hostSvc
-		hostMu.Unlock()
-		return svc, nil
-	}
-	hostMu.Unlock()
-
-	// 双检缓存后拨号：拨号过程只受 hostDialMu 保护，不持 hostMu，避免
-	// 卡住的 Dial 阻塞所有反调方。
-	hostDialMu.Lock()
-	defer hostDialMu.Unlock()
-	hostMu.Lock()
-	if hostDialDone && hostSvc != nil {
-		svc := hostSvc
-		hostMu.Unlock()
-		return svc, nil
-	}
-	hostMu.Unlock()
-
-	// Only cache SUCCESS: a transient dial failure (e.g. host broker not ready
-	// yet) must not poison the plugin for its whole lifetime, otherwise every
-	// reverse call (GetConfig/ChatLLM/...) fails forever and plugins fall back
-	// to default config (the 401 symptom).
-	conn, err := b.DialWithOptions(HostServiceAppID,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(maxGRPCMessageSize),
-			grpc.MaxCallSendMsgSize(maxGRPCMessageSize),
-		))
-	if err != nil {
-		return nil, err
-	}
-	hostMu.Lock()
-	hostConn = conn
-	hostSvc = sdkv1.NewHostServiceClient(conn)
-	hostDialDone = true
-	hostMu.Unlock()
-	return hostSvc, nil
-}
-
-var errNoBroker = &hostUnavailableError{"host service unavailable: plugin not being served"}
-
-// dialNativeHostService 是 Native 运行方式下插件→宿主的反向调用客户端：
-// 直接拨号 setNativeHostTarget 记录的 gRPC target（本机回环），不复用
-// go-plugin broker。仅缓存成功，瞬态失败不毒化缓存（同 broker 路径）。
-func dialNativeHostService(target string) (sdkv1.HostServiceClient, error) {
-	hostMu.Lock()
-	if hostDialDone && hostSvc != nil {
-		svc := hostSvc
-		hostMu.Unlock()
-		return svc, nil
-	}
-	hostMu.Unlock()
-
-	hostDialMu.Lock()
-	defer hostDialMu.Unlock()
-	hostMu.Lock()
-	if hostDialDone && hostSvc != nil {
-		svc := hostSvc
-		hostMu.Unlock()
-		return svc, nil
-	}
-	hostMu.Unlock()
-
-	conn, err := grpc.NewClient(target,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(maxGRPCMessageSize),
-			grpc.MaxCallSendMsgSize(maxGRPCMessageSize),
-		))
-	if err != nil {
-		return nil, err
-	}
-	hostMu.Lock()
-	hostConn = conn
-	hostSvc = sdkv1.NewHostServiceClient(conn)
-	hostDialDone = true
-	hostMu.Unlock()
-	return hostSvc, nil
-}
+var errNoHostCaller = &hostUnavailableError{"host service unavailable: no reverse-call transport linked"}
 
 type hostUnavailableError struct{ msg string }
 
@@ -223,7 +77,7 @@ type host struct{}
 // the adapter id (e.g. "aiocqhttp"); params are the action parameters. The
 // returned map is the action's "data" object.
 func (h *host) CallAction(platform, api string, params map[string]any) (map[string]any, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +107,7 @@ func (h *host) CallAction(platform, api string, params map[string]any) (map[stri
 // SendMessage sends a message chain to a session on a platform adapter.
 // sessionID is the conversation id (group id or friend user id).
 func (h *host) SendMessage(platform, sessionID string, chain []Component) error {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return err
 	}
@@ -272,7 +126,7 @@ func (h *host) SendMessage(platform, sessionID string, chain []Component) error 
 // 大文件经宿主 blob 读取组装，避免全量 base64 塞进 chain_json。
 // 新 API（原生组件）。
 func (h *host) SendMessageComponents(platform, sessionID string, comps []*sdkv1.Component) error {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return err
 	}
@@ -288,7 +142,7 @@ func (h *host) SendMessageComponents(platform, sessionID string, comps []*sdkv1.
 
 // RecallMessage recalls an already-sent message by platform message id.
 func (h *host) RecallMessage(platform, messageID string) error {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return err
 	}
@@ -304,7 +158,7 @@ func (h *host) RecallMessage(platform, messageID string) error {
 // GetConfig returns the plugin's persisted config map
 // (data/plugins/<name>/config.json on the host).
 func (h *host) GetConfig(pluginName string) (map[string]any, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return nil, err
 	}
@@ -329,7 +183,7 @@ func (h *host) GetConfig(pluginName string) (map[string]any, error) {
 // (data/plugins/<name>/config.json on the host). Read-modify-write with
 // GetConfig to preserve unrelated keys.
 func (h *host) SetConfig(pluginName string, cfg map[string]any) error {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return err
 	}
@@ -351,7 +205,7 @@ func (h *host) SetConfig(pluginName string, cfg map[string]any) error {
 // and returns the model's reply text. It is the zero-copy entry point; the
 // request pointer is passed through directly.
 func (h *host) ChatLLMFull(req *sdkv1.ChatLLMRequest) (string, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return "", err
 	}
@@ -377,7 +231,7 @@ func (h *host) ChatLLM(prompt, systemPrompt string, imageURLs []string) (string,
 
 // React adds an emoji reaction to a message on a platform adapter.
 func (h *host) React(platform, sessionID, messageID, emoji string) error {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return err
 	}
@@ -408,7 +262,7 @@ func (h *host) TextToImage(text, templateName string) (string, error) {
 // TextToImageBytes 返回宿主 t2i 渲染的 PNG 原始字节（P0-1：优先读 RPC 的
 // image_bytes，旧宿主只填 image_base64 时回退 base64 解码）。
 func (h *host) TextToImageBytes(text, templateName string) ([]byte, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return nil, err
 	}
@@ -443,7 +297,7 @@ func (h *host) HtmlRender(template, data, options string) (string, error) {
 // HtmlRenderBytes 返回宿主 HtmlRender 渲染的 PNG 原始字节（P0-1：优先读
 // image_bytes，旧宿主只填 image_base64 时回退 base64 解码）。
 func (h *host) HtmlRenderBytes(template, data, options string) ([]byte, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return nil, err
 	}
@@ -467,7 +321,7 @@ func (h *host) HtmlRenderBytes(template, data, options string) ([]byte, error) {
 // telegram 等兼容层用）。宿主收到入站消息时会把序列化事件推给该插件的
 // HandleHook(name=hookName)。返回 nil 表示注册成功。
 func (h *host) RegisterBridgeHook(hookName string) error {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return err
 	}
@@ -479,7 +333,7 @@ func (h *host) RegisterBridgeHook(hookName string) error {
 
 // UnregisterBridgeHook 注销桥接钩子，宿主不再推送入站消息。
 func (h *host) UnregisterBridgeHook(hookName string) error {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return err
 	}
@@ -492,7 +346,7 @@ func (h *host) UnregisterBridgeHook(hookName string) error {
 // CreateBlob 把 data 交给宿主持久化，返回受控 FileReference handle（P0-2）。
 // 大文件（>inline 阈值）由插件侧决定走此路径；宿主统一 TTL/GC。
 func (h *host) CreateBlob(data []byte, mimeType, filename string, ttlSeconds int32) (*sdkv1.FileReference, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return nil, err
 	}
@@ -515,7 +369,7 @@ func (h *host) CreateBlob(data []byte, mimeType, filename string, ttlSeconds int
 
 // ReadBlob 分块读取宿主 blob（offset/limit；limit<=0 用宿主默认块）。
 func (h *host) ReadBlob(handleID string, offset int64, limit int32) ([]byte, bool, int64, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return nil, false, 0, err
 	}
@@ -530,7 +384,7 @@ func (h *host) ReadBlob(handleID string, offset int64, limit int32) ([]byte, boo
 
 // GetBlobInfo 返回 blob 元数据。
 func (h *host) GetBlobInfo(handleID string) (*sdkv1.FileReference, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return nil, err
 	}
@@ -548,7 +402,7 @@ func (h *host) GetBlobInfo(handleID string) (*sdkv1.FileReference, error) {
 
 // ReleaseBlob 主动释放宿主 blob（最终删除由宿主 TTL/GC 判定）。
 func (h *host) ReleaseBlob(handleID string) error {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return err
 	}
@@ -560,7 +414,7 @@ func (h *host) ReleaseBlob(handleID string) error {
 
 // ListSkills 返回宿主技能管理器中的全部技能（强类型 SkillInfo）。
 func (h *host) ListSkills() ([]SkillInfo, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return nil, err
 	}
@@ -584,7 +438,7 @@ func (h *host) ListSkills() ([]SkillInfo, error) {
 
 // SetSkillActive 启用/禁用指定技能。
 func (h *host) SetSkillActive(name string, active bool) error {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return err
 	}
@@ -596,7 +450,7 @@ func (h *host) SetSkillActive(name string, active bool) error {
 
 // DeleteSkill 删除指定技能。
 func (h *host) DeleteSkill(name string) error {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return err
 	}
@@ -609,7 +463,7 @@ func (h *host) DeleteSkill(name string) error {
 // GetPlatformMessageHistory 按平台/用户取最近 limit 条平台消息记录
 // （强类型 PMHistoryRecord）。
 func (h *host) GetPlatformMessageHistory(platformID, userID string, limit int32) ([]PMHistoryRecord, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return nil, err
 	}
@@ -639,7 +493,7 @@ func (h *host) GetPlatformMessageHistory(platformID, userID string, limit int32)
 // dict / list / str），返回完整记录（强类型 PMHistoryRecord，id/created_at
 // 由宿主生成）。
 func (h *host) InsertPlatformMessageHistory(platformID, userID, senderID string, content any, llmCheckpointID string, maxMessages int32) (PMHistoryRecord, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return PMHistoryRecord{}, err
 	}
@@ -673,7 +527,7 @@ func (h *host) InsertPlatformMessageHistory(platformID, userID, senderID string,
 // UpdatePlatformMessageHistory 更新一条记录（content 或 llm_checkpoint_id，
 // 传 nil 表示不更新对应字段）。
 func (h *host) UpdatePlatformMessageHistory(id int64, content any, llmCheckpointID string) error {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return err
 	}
@@ -693,7 +547,7 @@ func (h *host) UpdatePlatformMessageHistory(id int64, content any, llmCheckpoint
 
 // DeletePlatformMessageHistory 按 ID 删除一条平台消息记录。
 func (h *host) DeletePlatformMessageHistory(id int64) error {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return err
 	}
@@ -707,7 +561,7 @@ func (h *host) DeletePlatformMessageHistory(id int64) error {
 // 过滤运行时视图（"local"/"sandbox"/""=全部）；showSandboxPath 返回 sandbox
 // 路径而非宿主本地路径（强类型 SkillInfo）。
 func (h *host) ListSkillsV2(activeOnly bool, runtime string, showSandboxPath bool) ([]SkillInfo, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return nil, err
 	}
@@ -737,7 +591,7 @@ func (h *host) ListSkillsV2(activeOnly bool, runtime string, showSandboxPath boo
 // （无命中时 context_text 为空、results_json 为 "[]"）。可经
 // ParseKBSearchResults 解析为强类型切片。kbNames 为空 = 宿主全部知识库。
 func (h *host) KBRetrieve(query string, kbNames []string, topKFusion, topMFinal int) (string, string, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return "", "", err
 	}
@@ -763,7 +617,7 @@ func (h *host) KBRetrieve(query string, kbNames []string, topKFusion, topMFinal 
 // KBUploadFromURL 让宿主从 URL 拉取文档写入指定知识库并分块
 // （chunkSize/chunkOverlap <=0 用宿主默认；kbNameOrID 为知识库名或 ID）。
 func (h *host) KBUploadFromURL(kbNameOrID, url string, chunkSize, chunkOverlap int) error {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return err
 	}
@@ -781,7 +635,7 @@ func (h *host) KBUploadFromURL(kbNameOrID, url string, chunkSize, chunkOverlap i
 
 // KBListKBs 返回宿主全部知识库元数据（强类型 KBInfo）。
 func (h *host) KBListKBs() ([]KBInfo, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return nil, err
 	}
@@ -807,7 +661,7 @@ func (h *host) KBListKBs() ([]KBInfo, error) {
 // <=0 用宿主默认 TTL），下游凭 token 经宿主公开文件路由（/api/file/{token}）
 // 读取文件，避免暴露真实路径。
 func (h *host) RegisterFileToken(path string, timeoutSec int32) (string, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return "", err
 	}
@@ -825,7 +679,7 @@ func (h *host) RegisterFileToken(path string, timeoutSec int32) (string, error) 
 
 // CronCreate 创建定时任务，返回宿主 Job 快照（强类型 CronJobInfo）。
 func (h *host) CronCreate(spec CronCreateSpec) (CronJobInfo, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return CronJobInfo{}, err
 	}
@@ -858,7 +712,7 @@ func (h *host) CronCreate(spec CronCreateSpec) (CronJobInfo, error) {
 // CronUpdate 按 jobID 更新任务字段（fields 仅含需更新的键），返回更新后的
 // Job 快照（强类型 CronJobInfo）。
 func (h *host) CronUpdate(jobID string, fields map[string]any) (CronJobInfo, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return CronJobInfo{}, err
 	}
@@ -880,7 +734,7 @@ func (h *host) CronUpdate(jobID string, fields map[string]any) (CronJobInfo, err
 
 // CronDelete 删除指定定时任务。
 func (h *host) CronDelete(jobID string) error {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return err
 	}
@@ -892,7 +746,7 @@ func (h *host) CronDelete(jobID string) error {
 
 // CronList 列出定时任务（jobType 空 = 全部类型，强类型 CronJobInfo）。
 func (h *host) CronList(jobType string) ([]CronJobInfo, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return nil, err
 	}
@@ -915,7 +769,7 @@ func (h *host) CronList(jobType string) ([]CronJobInfo, error) {
 
 // CronRunNow 立即触发一次指定任务。
 func (h *host) CronRunNow(jobID string) error {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return err
 	}
@@ -927,7 +781,7 @@ func (h *host) CronRunNow(jobID string) error {
 
 // McpListTools 汇总宿主已连接 MCP server 的全部工具（强类型 MCPToolInfo）。
 func (h *host) McpListTools() ([]MCPToolInfo, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return nil, err
 	}
@@ -952,7 +806,7 @@ func (h *host) McpListTools() ([]MCPToolInfo, error) {
 // McpCallTool 调用宿主侧 MCP 工具（server + toolName + args），返回完整
 // 结果（content/isError，含宿主提取的纯文本摘要）。
 func (h *host) McpCallTool(server, toolName string, args map[string]any) (*MCPToolCallResult, error) {
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return nil, err
 	}
@@ -1208,14 +1062,14 @@ var hostServiceLoggerMu sync.RWMutex
 // hostServiceLogger 是宿主侧 HostService 的告警日志通道。SDK 没有宿主注入
 // 的 logger，默认输出到 stderr；宿主可在启动插件前通过 SetHostServiceLogger
 // 替换为自带 logger。
-var hostServiceLogger = hclog.New(&hclog.LoggerOptions{
-	Name:   "astrbot-sdk.hostservice",
-	Level:  hclog.Warn,
-	Output: os.Stderr,
-})
+var hostServiceLogger Logger = func() Logger {
+	l := newStdLogger("astrbot-sdk.hostservice")
+	l.SetLevelName("WARNING")
+	return l
+}()
 
 // SetHostServiceLogger 替换宿主侧 HostService 的告警 logger（nil 忽略）。
-func SetHostServiceLogger(l hclog.Logger) {
+func SetHostServiceLogger(l Logger) {
 	if l == nil {
 		return
 	}
@@ -1240,20 +1094,20 @@ func warnJSON(what string, err error) {
 // 绑定身份（s.pluginID 非空）。宿主未设置身份时（SetCurrentHostPluginID /
 // BindHostServiceName 未生效）pluginID 为空，一律拒绝，防止匿名/未绑定身份
 // 插件接管宿主插件生态（26-2）。
-func (s *hostServiceServer) requireIdentity() error {
+func (s *HostServiceServer) requireIdentity() error {
 	if s.identity() == "" {
-		return status.Error(codes.PermissionDenied, "control-plane HostService RPC requires a bound plugin identity")
+		return Error(CodePermissionDenied, "control-plane HostService RPC requires a bound plugin identity")
 	}
 	return nil
 }
 
-// dropPluginHostState 在插件连接关闭时清理该连接遗留的宿主侧状态：
+// DropPluginHostState 在插件连接关闭时清理该连接遗留的宿主侧状态：
 // hostServers 连接登记与 ChatLLM/CallAction 限流窗口，避免表只增不减
 // （26-3）。connKey 是 accept 时刻的 manifest id（hostServers 的 key）；
 // 若期间经 BindHostServiceName 更新了注册名，限流表还可能有注册名条目，
 // 一并清理。srv 用于归属比对：仅当 hostServers[connKey] 仍指向本连接时才
 // 删除，避免重载竞态下旧连接 Close 误删后继连接的登记。
-func dropPluginHostState(connKey string, srv *hostServiceServer) {
+func DropPluginHostState(connKey string, srv *HostServiceServer) {
 	if connKey == "" {
 		return
 	}
@@ -1275,73 +1129,11 @@ func dropPluginHostState(connKey string, srv *hostServiceServer) {
 	}
 }
 
-// acceptHostService serves HostService on a broker listener so plugins can
-// dial back into the host. It returns the gRPC server and listener so the
-// caller can stop them when the plugin client is closed (prevents reload
-// leaks of the serving goroutine and listener socket).
-func acceptHostService(b *plugin.GRPCBroker, id uint32) (*grpc.Server, net.Listener, *hostServiceServer, error) {
-	lis, err := b.Accept(id)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	// 提高默认 4MB 消息上限：插件经 HostService 反向传大 chain_json
-	//（base64 图片/长对话）时不会因超限而失败。
-	srv := grpc.NewServer(
-		grpc.MaxRecvMsgSize(maxGRPCMessageSize),
-		grpc.MaxSendMsgSize(maxGRPCMessageSize),
-	)
-	// connKey 保留 accept 时刻的 manifest id（hostServers 表的 key），
-	// 供连接关闭时清理 hostServers/限流表残留（26-3）。
-	pid := currentHostPluginID()
-	if pid == "" {
-		hostServiceLoggerMu.RLock()
-		logger := hostServiceLogger
-		hostServiceLoggerMu.RUnlock()
-		logger.Warn("acceptHostService: 宿主未设置当前插件 id（SetCurrentHostPluginID 未调用），" +
-			"本连接身份为空，控制面 RPC（GetConfig/SetConfig 等）将被拒绝")
-	}
-	server := &hostServiceServer{pluginID: pid, connKey: pid}
-	// 记录连接→插件 id，供 Register 后用注册名更新身份。
-	if pid != "" {
-		hostServersMu.Lock()
-		hostServers[pid] = server
-		hostServersMu.Unlock()
-	}
-	sdkv1.RegisterHostServiceServer(srv, server)
-	go func() {
-		_ = srv.Serve(lis)
-	}()
-	return srv, lis, server, nil
-}
-
-// ServeHostServiceOnListener serves the host's HostService on a plain loopback
-// listener for a Native plugin connection (no go-plugin broker). pluginID is the
-// plugin's manifest id used for reverse-call identity validation. It registers
-// the per-connection server in the hostServers map; the host must bind it to
-// the plugin's Client via Client.AttachNativeHostService so Close() can stop it
-// and drop per-connection state (26-3).
-func ServeHostServiceOnListener(lis net.Listener, pluginID string) (*grpc.Server, error) {
-	srv := grpc.NewServer(
-		grpc.MaxRecvMsgSize(maxGRPCMessageSize),
-		grpc.MaxSendMsgSize(maxGRPCMessageSize),
-	)
-	server := &hostServiceServer{pluginID: pluginID, connKey: pluginID}
-	if pluginID != "" {
-		hostServersMu.Lock()
-		hostServers[pluginID] = server
-		hostServersMu.Unlock()
-	}
-	sdkv1.RegisterHostServiceServer(srv, server)
-	go func() { _ = srv.Serve(lis) }()
-	return srv, nil
-}
-
-// hostServiceServer implements sdkv1.HostServiceServer on the host side,
+// HostServiceServer implements sdkv1.HostServiceServer on the host side,
 // delegating to the hooks installed via SetHostHooks. Each plugin connection
 // gets its own instance, bound to the plugin id the host was loading when the
 // connection was accepted, so reverse calls can be validated per-plugin.
-type hostServiceServer struct {
-	sdkv1.UnimplementedHostServiceServer
+type HostServiceServer struct {
 	// idMu 保护 pluginID（BindHostServiceName 写、各 RPC 读）。
 	idMu sync.RWMutex
 	// pluginID 是当前连接的注册名：accept 时为 manifest id，Register 后由
@@ -1370,7 +1162,7 @@ type hostServiceServer struct {
 //
 // 安全：注册名可被任意插件声明，绝不能作为管理鉴权键——恶意插件只要与管理员
 // 插件重名即可冒充。管理鉴权一律用 connectionID()（连接绑定的 manifest id）。
-func (s *hostServiceServer) identity() string {
+func (s *HostServiceServer) identity() string {
 	s.idMu.RLock()
 	defer s.idMu.RUnlock()
 	return s.pluginID
@@ -1382,7 +1174,7 @@ func (s *hostServiceServer) identity() string {
 //
 // connKey 为空（旧宿主未调用 SetCurrentHostPluginID，或测试直接构造）时回退
 // 注册名 pluginID，保持兼容；connKey 一旦绑定不再变更，无需加锁。
-func (s *hostServiceServer) connectionID() string {
+func (s *HostServiceServer) connectionID() string {
 	if s.connKey != "" {
 		return s.connKey
 	}
@@ -1415,7 +1207,7 @@ func SetSharedPluginResolver(fn func(string) string) {
 }
 
 // isSharedConn 报告本连接是否为共享 Runtime（多租户）。
-func (s *hostServiceServer) isSharedConn() bool {
+func (s *HostServiceServer) isSharedConn() bool {
 	return s.connKey == SharedRuntimeConnKey
 }
 
@@ -1423,7 +1215,7 @@ func (s *hostServiceServer) isSharedConn() bool {
 //   - 单插件连接：连接绑定的 manifest id（connKey）；
 //   - 共享 Runtime：按请求 plugin_name 经宿主解析器解析（per-request）；
 //     解析失败返回 ""（fail-closed，拒绝）。
-func (s *hostServiceServer) authID(pluginName string) string {
+func (s *HostServiceServer) authID(pluginName string) string {
 	if s.isSharedConn() {
 		sharedResolverMu.RLock()
 		fn := sharedPluginResolver
@@ -1441,7 +1233,7 @@ func (s *hostServiceServer) authID(pluginName string) string {
 //   - 共享 Runtime：连接承载多插件，无法从连接判定调用方，退化为「目标名能
 //     解析为已知 manifest id 即放行」。这是共享模式的**已知隔离损失**（方案
 //     第 7 节：共享进程无进程级隔离）；需要严格配置隔离的插件应走 python-grpc。
-func (s *hostServiceServer) ownsConfig(pluginName string) bool {
+func (s *HostServiceServer) ownsConfig(pluginName string) bool {
 	if s.isSharedConn() {
 		return s.authID(pluginName) != ""
 	}
@@ -1451,15 +1243,15 @@ func (s *hostServiceServer) ownsConfig(pluginName string) bool {
 // hostPluginID is the id of the plugin the host is currently establishing a
 // connection for. The host sets it (SetCurrentHostPluginID) right before
 // go-plugin Dispense; acceptHostService reads it so the per-connection
-// hostServiceServer knows which plugin it serves.
+// HostServiceServer knows which plugin it serves.
 var (
 	hostPluginIDMu sync.Mutex
 	hostPluginID   string
 
-	// hostServers 记录 accept 时创建的 per-connection hostServiceServer
+	// hostServers 记录 accept 时创建的 per-connection HostServiceServer
 	//（key=插件 manifest id），供宿主在 Register 后用注册名更新身份。
 	hostServersMu sync.Mutex
-	hostServers   = map[string]*hostServiceServer{}
+	hostServers   = map[string]*HostServiceServer{}
 )
 
 // SetCurrentHostPluginID records the plugin id being loaded so the next
@@ -1477,6 +1269,35 @@ func currentHostPluginID() string {
 	hostPluginIDMu.Lock()
 	defer hostPluginIDMu.Unlock()
 	return hostPluginID
+}
+
+// CurrentHostPluginID is the exported accessor used by the gRPC transport's
+// acceptHostService to bind the per-connection identity.
+func CurrentHostPluginID() string { return currentHostPluginID() }
+
+// HostServiceLogWarn logs through the host-service logger (used by the gRPC
+// transport for accept-time diagnostics).
+func HostServiceLogWarn(msg string, args ...any) {
+	hostServiceLoggerMu.RLock()
+	l := hostServiceLogger
+	hostServiceLoggerMu.RUnlock()
+	l.Warn(msg, args...)
+}
+
+// ConnKey returns the connection's accept-time manifest id (hostServers key).
+func (s *HostServiceServer) ConnKey() string { return s.connKey }
+
+// NewHostServiceServer creates and registers a per-connection host-service
+// implementation. The gRPC transport serves it; the Native transport returns it
+// as the plugin's in-process reverse-call client.
+func NewHostServiceServer(pluginID, connKey string) *HostServiceServer {
+	s := &HostServiceServer{pluginID: pluginID, connKey: connKey}
+	if pluginID != "" {
+		hostServersMu.Lock()
+		hostServers[pluginID] = s
+		hostServersMu.Unlock()
+	}
+	return s
 }
 
 // BindHostServiceName updates the per-connection HostService server's plugin
@@ -1498,11 +1319,11 @@ func BindHostServiceName(id, name string) {
 	}
 }
 
-func (s *hostServiceServer) CallAction(_ context.Context, req *sdkv1.CallActionRequest) (*sdkv1.CallActionResponse, error) {
+func (s *HostServiceServer) CallAction(_ context.Context, req *sdkv1.CallActionRequest) (*sdkv1.CallActionResponse, error) {
 	// CallAction 是高频平台 API 入口，做与 ChatLLM 同款的窗口限流（26-6）。
 	id := s.identity()
 	if !callActionRate.allow(id) {
-		return nil, status.Errorf(codes.ResourceExhausted, "插件 %q CallAction 调用过于频繁（每分钟上限 %d 次）", id, callActionRate.limit())
+		return nil, Errorf(CodeResourceExhausted, "插件 %q CallAction 调用过于频繁（每分钟上限 %d 次）", id, callActionRate.limit())
 	}
 	h := getHostHooks()
 	if h.CallAction == nil {
@@ -1512,7 +1333,7 @@ func (s *hostServiceServer) CallAction(_ context.Context, req *sdkv1.CallActionR
 	if len(req.ParamsJson) > 0 {
 		if err := json.Unmarshal(req.ParamsJson, &params); err != nil {
 			warnJSON("CallAction params_json", err)
-			return nil, status.Errorf(codes.InvalidArgument, "params_json decode failed: %v", err)
+			return nil, Errorf(CodeInvalidArgument, "params_json decode failed: %v", err)
 		}
 	}
 	result, err := h.CallAction(req.Platform, req.Api, params)
@@ -1526,7 +1347,7 @@ func (s *hostServiceServer) CallAction(_ context.Context, req *sdkv1.CallActionR
 	return &sdkv1.CallActionResponse{ResultJson: out}, nil
 }
 
-func (s *hostServiceServer) SendMessage(_ context.Context, req *sdkv1.SendMessageRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) SendMessage(_ context.Context, req *sdkv1.SendMessageRequest) (*sdkv1.Empty, error) {
 	h := getHostHooks()
 	if h.SendMessage == nil {
 		return &sdkv1.Empty{}, nil
@@ -1536,7 +1357,7 @@ func (s *hostServiceServer) SendMessage(_ context.Context, req *sdkv1.SendMessag
 	for _, c := range req.ChainComponents {
 		comp, err := protoComponentToSDK(c)
 		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "chain component decode failed: %v", err)
+			return nil, Errorf(CodeInvalidArgument, "chain component decode failed: %v", err)
 		}
 		chain = append(chain, comp)
 	}
@@ -1610,7 +1431,7 @@ func readBlobAll(handleID string) ([]byte, error) {
 	}
 }
 
-func (s *hostServiceServer) RecallMessage(_ context.Context, req *sdkv1.RecallMessageRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) RecallMessage(_ context.Context, req *sdkv1.RecallMessageRequest) (*sdkv1.Empty, error) {
 	h := getHostHooks()
 	if h.RecallMessage == nil {
 		return &sdkv1.Empty{}, nil
@@ -1621,7 +1442,7 @@ func (s *hostServiceServer) RecallMessage(_ context.Context, req *sdkv1.RecallMe
 	return &sdkv1.Empty{}, nil
 }
 
-func (s *hostServiceServer) GetConfig(_ context.Context, req *sdkv1.GetConfigRequest) (*sdkv1.GetConfigResponse, error) {
+func (s *HostServiceServer) GetConfig(_ context.Context, req *sdkv1.GetConfigRequest) (*sdkv1.GetConfigResponse, error) {
 	// 身份隔离：插件只能读取自己名字的配置，禁止探测/读取其他插件配置
 	//（插件自身以宿主用户运行、可直接读文件系统，此校验是纵深防御，
 	//  真正隔离需插件降权/容器化）。空身份一律拒绝（fail-closed）。
@@ -1629,7 +1450,7 @@ func (s *hostServiceServer) GetConfig(_ context.Context, req *sdkv1.GetConfigReq
 		return nil, err
 	}
 	if !s.ownsConfig(req.PluginName) {
-		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权读取插件 %q 的配置", s.identity(), req.PluginName)
+		return nil, Errorf(CodePermissionDenied, "插件 %q 无权读取插件 %q 的配置", s.identity(), req.PluginName)
 	}
 	h := getHostHooks()
 	if h.GetConfig == nil {
@@ -1646,14 +1467,14 @@ func (s *hostServiceServer) GetConfig(_ context.Context, req *sdkv1.GetConfigReq
 	return &sdkv1.GetConfigResponse{ConfigJson: out}, nil
 }
 
-func (s *hostServiceServer) SetConfig(_ context.Context, req *sdkv1.SetConfigRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) SetConfig(_ context.Context, req *sdkv1.SetConfigRequest) (*sdkv1.Empty, error) {
 	// 身份隔离：插件只能写自己名字的配置，禁止篡改其他插件配置。空身份
 	// 一律拒绝（fail-closed）。
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	if !s.ownsConfig(req.PluginName) {
-		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权修改插件 %q 的配置", s.identity(), req.PluginName)
+		return nil, Errorf(CodePermissionDenied, "插件 %q 无权修改插件 %q 的配置", s.identity(), req.PluginName)
 	}
 	h := getHostHooks()
 	if h.SetConfig == nil {
@@ -1757,10 +1578,10 @@ func setRateLimit(r *rateTable, perMinute int) int {
 	return old
 }
 
-func (s *hostServiceServer) ChatLLM(_ context.Context, req *sdkv1.ChatLLMRequest) (*sdkv1.ChatLLMResponse, error) {
+func (s *HostServiceServer) ChatLLM(_ context.Context, req *sdkv1.ChatLLMRequest) (*sdkv1.ChatLLMResponse, error) {
 	id := s.identity()
 	if !chatLLMRate.allow(id) {
-		return nil, status.Errorf(codes.ResourceExhausted, "插件 %q ChatLLM 调用过于频繁（每分钟上限 %d 次）", id, chatLLMRate.limit())
+		return nil, Errorf(CodeResourceExhausted, "插件 %q ChatLLM 调用过于频繁（每分钟上限 %d 次）", id, chatLLMRate.limit())
 	}
 	h := getHostHooks()
 	if h.ChatLLM == nil {
@@ -1774,7 +1595,7 @@ func (s *hostServiceServer) ChatLLM(_ context.Context, req *sdkv1.ChatLLMRequest
 }
 
 // React adds an emoji reaction to a message on a platform adapter.
-func (s *hostServiceServer) React(_ context.Context, req *sdkv1.ReactRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) React(_ context.Context, req *sdkv1.ReactRequest) (*sdkv1.Empty, error) {
 	h := getHostHooks()
 	if h.React == nil {
 		return &sdkv1.Empty{}, nil
@@ -1783,7 +1604,7 @@ func (s *hostServiceServer) React(_ context.Context, req *sdkv1.ReactRequest) (*
 }
 
 // TextToImage renders text into an image via the host t2i engine.
-func (s *hostServiceServer) TextToImage(_ context.Context, req *sdkv1.TextToImageRequest) (*sdkv1.TextToImageResponse, error) {
+func (s *HostServiceServer) TextToImage(_ context.Context, req *sdkv1.TextToImageRequest) (*sdkv1.TextToImageResponse, error) {
 	h := getHostHooks()
 	if h.TextToImage == nil {
 		return &sdkv1.TextToImageResponse{}, nil
@@ -1796,7 +1617,7 @@ func (s *hostServiceServer) TextToImage(_ context.Context, req *sdkv1.TextToImag
 }
 
 // HtmlRender renders an HTML template + data into an image via the host.
-func (s *hostServiceServer) HtmlRender(_ context.Context, req *sdkv1.HtmlRenderRequest) (*sdkv1.HtmlRenderResponse, error) {
+func (s *HostServiceServer) HtmlRender(_ context.Context, req *sdkv1.HtmlRenderRequest) (*sdkv1.HtmlRenderResponse, error) {
 	h := getHostHooks()
 	if h.HtmlRender == nil {
 		return &sdkv1.HtmlRenderResponse{}, nil
@@ -1824,7 +1645,7 @@ func dualHtmlResponse(b64 string) *sdkv1.HtmlRenderResponse {
 
 // ── 会话管理 RPC 实现 ──────────────────────────────────────────────────────
 
-func (s *hostServiceServer) GetCurrConversationID(_ context.Context, req *sdkv1.ConversationIDRequest) (*sdkv1.ConversationIDResponse, error) {
+func (s *HostServiceServer) GetCurrConversationID(_ context.Context, req *sdkv1.ConversationIDRequest) (*sdkv1.ConversationIDResponse, error) {
 	h := getHostHooks()
 	if h.GetCurrConversationID == nil {
 		return &sdkv1.ConversationIDResponse{}, nil
@@ -1832,7 +1653,7 @@ func (s *hostServiceServer) GetCurrConversationID(_ context.Context, req *sdkv1.
 	return &sdkv1.ConversationIDResponse{Cid: h.GetCurrConversationID(req.UnifiedMsgOrigin)}, nil
 }
 
-func (s *hostServiceServer) NewConversation(_ context.Context, req *sdkv1.NewConversationRequest) (*sdkv1.ConversationIDResponse, error) {
+func (s *HostServiceServer) NewConversation(_ context.Context, req *sdkv1.NewConversationRequest) (*sdkv1.ConversationIDResponse, error) {
 	// 新建会话会"设为当前"，等效于重置该用户的对话上下文，与其他会话
 	// 变更 RPC 一致地要求绑定身份。
 	if err := s.requireIdentity(); err != nil {
@@ -1845,7 +1666,7 @@ func (s *hostServiceServer) NewConversation(_ context.Context, req *sdkv1.NewCon
 	return &sdkv1.ConversationIDResponse{Cid: h.NewConversation(req.UnifiedMsgOrigin, req.PlatformId, req.PersonaId)}, nil
 }
 
-func (s *hostServiceServer) GetConversation(_ context.Context, req *sdkv1.GetConversationRequest) (*sdkv1.ConversationResponse, error) {
+func (s *HostServiceServer) GetConversation(_ context.Context, req *sdkv1.GetConversationRequest) (*sdkv1.ConversationResponse, error) {
 	h := getHostHooks()
 	if h.GetConversation == nil {
 		return &sdkv1.ConversationResponse{}, nil
@@ -1857,14 +1678,14 @@ func (s *hostServiceServer) GetConversation(_ context.Context, req *sdkv1.GetCon
 	return &sdkv1.ConversationResponse{ConversationJson: out}, nil
 }
 
-func (s *hostServiceServer) GetConversations(_ context.Context, req *sdkv1.GetConversationsRequest) (*sdkv1.ConversationsResponse, error) {
+func (s *HostServiceServer) GetConversations(_ context.Context, req *sdkv1.GetConversationsRequest) (*sdkv1.ConversationsResponse, error) {
 	// 会话含完整聊天历史，属隐私敏感数据：要求绑定身份，且禁止经插件
 	// RPC 全量列举（空 umo = 所有用户/平台的全部会话）。
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	if req.UnifiedMsgOrigin == "" {
-		return nil, status.Error(codes.PermissionDenied, "listing all conversations is not allowed over the plugin RPC")
+		return nil, Error(CodePermissionDenied, "listing all conversations is not allowed over the plugin RPC")
 	}
 	h := getHostHooks()
 	if h.GetConversations == nil {
@@ -1881,7 +1702,7 @@ func (s *hostServiceServer) GetConversations(_ context.Context, req *sdkv1.GetCo
 	return resp, nil
 }
 
-func (s *hostServiceServer) DeleteConversation(_ context.Context, req *sdkv1.DeleteConversationRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) DeleteConversation(_ context.Context, req *sdkv1.DeleteConversationRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
@@ -1895,7 +1716,7 @@ func (s *hostServiceServer) DeleteConversation(_ context.Context, req *sdkv1.Del
 	return &sdkv1.Empty{}, nil
 }
 
-func (s *hostServiceServer) SwitchConversation(_ context.Context, req *sdkv1.SwitchConversationRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) SwitchConversation(_ context.Context, req *sdkv1.SwitchConversationRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
@@ -1909,7 +1730,7 @@ func (s *hostServiceServer) SwitchConversation(_ context.Context, req *sdkv1.Swi
 	return &sdkv1.Empty{}, nil
 }
 
-func (s *hostServiceServer) UpdateConversationTitle(_ context.Context, req *sdkv1.UpdateConversationTitleRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) UpdateConversationTitle(_ context.Context, req *sdkv1.UpdateConversationTitleRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
@@ -1923,7 +1744,7 @@ func (s *hostServiceServer) UpdateConversationTitle(_ context.Context, req *sdkv
 	return &sdkv1.Empty{}, nil
 }
 
-func (s *hostServiceServer) UpdateConversationPersonaID(_ context.Context, req *sdkv1.UpdateConversationPersonaRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) UpdateConversationPersonaID(_ context.Context, req *sdkv1.UpdateConversationPersonaRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
@@ -1939,7 +1760,7 @@ func (s *hostServiceServer) UpdateConversationPersonaID(_ context.Context, req *
 
 // ── 人格管理 RPC 实现 ──────────────────────────────────────────────────────
 
-func (s *hostServiceServer) GetPersonas(_ context.Context, _ *sdkv1.Empty) (*sdkv1.PersonasResponse, error) {
+func (s *HostServiceServer) GetPersonas(_ context.Context, _ *sdkv1.Empty) (*sdkv1.PersonasResponse, error) {
 	h := getHostHooks()
 	if h.GetPersonas == nil {
 		return &sdkv1.PersonasResponse{}, nil
@@ -1955,7 +1776,7 @@ func (s *hostServiceServer) GetPersonas(_ context.Context, _ *sdkv1.Empty) (*sdk
 	return resp, nil
 }
 
-func (s *hostServiceServer) GetDefaultPersona(_ context.Context, req *sdkv1.GetDefaultPersonaRequest) (*sdkv1.PersonaResponse, error) {
+func (s *HostServiceServer) GetDefaultPersona(_ context.Context, req *sdkv1.GetDefaultPersonaRequest) (*sdkv1.PersonaResponse, error) {
 	h := getHostHooks()
 	if h.GetDefaultPersona == nil {
 		return &sdkv1.PersonaResponse{}, nil
@@ -1967,7 +1788,7 @@ func (s *hostServiceServer) GetDefaultPersona(_ context.Context, req *sdkv1.GetD
 	return &sdkv1.PersonaResponse{PersonaJson: out}, nil
 }
 
-func (s *hostServiceServer) GetPersonaTree(_ context.Context, _ *sdkv1.Empty) (*sdkv1.PersonaTreeResponse, error) {
+func (s *HostServiceServer) GetPersonaTree(_ context.Context, _ *sdkv1.Empty) (*sdkv1.PersonaTreeResponse, error) {
 	h := getHostHooks()
 	if h.GetPersonaTree == nil {
 		return &sdkv1.PersonaTreeResponse{}, nil
@@ -1991,7 +1812,7 @@ func (s *hostServiceServer) GetPersonaTree(_ context.Context, _ *sdkv1.Empty) (*
 	return resp, nil
 }
 
-func (s *hostServiceServer) ResolveSelectedPersona(_ context.Context, req *sdkv1.ResolvePersonaRequest) (*sdkv1.ResolvePersonaResponse, error) {
+func (s *HostServiceServer) ResolveSelectedPersona(_ context.Context, req *sdkv1.ResolvePersonaRequest) (*sdkv1.ResolvePersonaResponse, error) {
 	h := getHostHooks()
 	if h.ResolveSelectedPersona == nil {
 		return &sdkv1.ResolvePersonaResponse{}, nil
@@ -2014,7 +1835,7 @@ func (s *hostServiceServer) ResolveSelectedPersona(_ context.Context, req *sdkv1
 
 // ── Provider 管理 RPC 实现 ─────────────────────────────────────────────────
 
-func (s *hostServiceServer) ListProviders(_ context.Context, req *sdkv1.ListProvidersRequest) (*sdkv1.ProvidersResponse, error) {
+func (s *HostServiceServer) ListProviders(_ context.Context, req *sdkv1.ListProvidersRequest) (*sdkv1.ProvidersResponse, error) {
 	h := getHostHooks()
 	if h.ListProviders == nil {
 		return &sdkv1.ProvidersResponse{}, nil
@@ -2030,7 +1851,7 @@ func (s *hostServiceServer) ListProviders(_ context.Context, req *sdkv1.ListProv
 	return resp, nil
 }
 
-func (s *hostServiceServer) GetUsingProvider(_ context.Context, req *sdkv1.GetUsingProviderRequest) (*sdkv1.ProviderResponse, error) {
+func (s *HostServiceServer) GetUsingProvider(_ context.Context, req *sdkv1.GetUsingProviderRequest) (*sdkv1.ProviderResponse, error) {
 	h := getHostHooks()
 	if h.GetUsingProvider == nil {
 		return &sdkv1.ProviderResponse{}, nil
@@ -2042,7 +1863,7 @@ func (s *hostServiceServer) GetUsingProvider(_ context.Context, req *sdkv1.GetUs
 	return &sdkv1.ProviderResponse{ProviderJson: out}, nil
 }
 
-func (s *hostServiceServer) SetProvider(_ context.Context, req *sdkv1.SetProviderRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) SetProvider(_ context.Context, req *sdkv1.SetProviderRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
@@ -2056,7 +1877,7 @@ func (s *hostServiceServer) SetProvider(_ context.Context, req *sdkv1.SetProvide
 	return &sdkv1.Empty{}, nil
 }
 
-func (s *hostServiceServer) GetProviderModels(_ context.Context, req *sdkv1.GetProviderModelsRequest) (*sdkv1.ProviderModelsResponse, error) {
+func (s *HostServiceServer) GetProviderModels(_ context.Context, req *sdkv1.GetProviderModelsRequest) (*sdkv1.ProviderModelsResponse, error) {
 	h := getHostHooks()
 	if h.GetProviderModels == nil {
 		return &sdkv1.ProviderModelsResponse{}, nil
@@ -2066,7 +1887,7 @@ func (s *hostServiceServer) GetProviderModels(_ context.Context, req *sdkv1.GetP
 
 // ── 插件/Star 管理 RPC 实现 ────────────────────────────────────────────────
 
-func (s *hostServiceServer) GetPluginRegistry(_ context.Context, _ *sdkv1.Empty) (*sdkv1.StarsResponse, error) {
+func (s *HostServiceServer) GetPluginRegistry(_ context.Context, _ *sdkv1.Empty) (*sdkv1.StarsResponse, error) {
 	h := getHostHooks()
 	if h.GetPluginRegistry == nil {
 		return &sdkv1.StarsResponse{}, nil
@@ -2082,7 +1903,7 @@ func (s *hostServiceServer) GetPluginRegistry(_ context.Context, _ *sdkv1.Empty)
 	return resp, nil
 }
 
-func (s *hostServiceServer) GetStar(_ context.Context, req *sdkv1.GetStarRequest) (*sdkv1.StarResponse, error) {
+func (s *HostServiceServer) GetStar(_ context.Context, req *sdkv1.GetStarRequest) (*sdkv1.StarResponse, error) {
 	h := getHostHooks()
 	if h.GetStar == nil {
 		return &sdkv1.StarResponse{}, nil
@@ -2094,7 +1915,7 @@ func (s *hostServiceServer) GetStar(_ context.Context, req *sdkv1.GetStarRequest
 	return &sdkv1.StarResponse{StarJson: out}, nil
 }
 
-func (s *hostServiceServer) SetPluginEnabled(_ context.Context, req *sdkv1.SetPluginEnabledRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) SetPluginEnabled(_ context.Context, req *sdkv1.SetPluginEnabledRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
@@ -2102,7 +1923,7 @@ func (s *hostServiceServer) SetPluginEnabled(_ context.Context, req *sdkv1.SetPl
 	// 须在管理员名单内。管理鉴权以连接绑定的 manifest id（connectionID）为键，
 	// 注册名重名无法冒充（26-2 / p11）。
 	if !s.ownsConfig(req.PluginName) && !hostAdminAuthorized(s.connectionID()) {
-		return nil, status.Errorf(codes.PermissionDenied,
+		return nil, Errorf(CodePermissionDenied,
 			"插件 %q 无权操作插件 %q（仅允许操作自身，或经宿主授权的管理插件）", s.identity(), req.PluginName)
 	}
 	h := getHostHooks()
@@ -2115,7 +1936,7 @@ func (s *hostServiceServer) SetPluginEnabled(_ context.Context, req *sdkv1.SetPl
 	return &sdkv1.Empty{}, nil
 }
 
-func (s *hostServiceServer) InstallPlugin(_ context.Context, req *sdkv1.InstallPluginRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) InstallPlugin(_ context.Context, req *sdkv1.InstallPluginRequest) (*sdkv1.Empty, error) {
 	// 安装接受任意 git/url 源，等价于把 RCE 安装面暴露给插件，只允许
 	// 管理员名单内的插件执行。
 	if err := s.requireIdentity(); err != nil {
@@ -2123,7 +1944,7 @@ func (s *hostServiceServer) InstallPlugin(_ context.Context, req *sdkv1.InstallP
 	}
 	// 管理鉴权键 = 连接绑定的 manifest id（connectionID），不是可被冒用的注册名。
 	if !hostAdminAuthorized(s.connectionID()) {
-		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权安装插件（需宿主授权为管理插件）", s.identity())
+		return nil, Errorf(CodePermissionDenied, "插件 %q 无权安装插件（需宿主授权为管理插件）", s.identity())
 	}
 	h := getHostHooks()
 	if h.InstallPlugin == nil {
@@ -2135,14 +1956,14 @@ func (s *hostServiceServer) InstallPlugin(_ context.Context, req *sdkv1.InstallP
 	return &sdkv1.Empty{}, nil
 }
 
-func (s *hostServiceServer) UninstallPlugin(_ context.Context, req *sdkv1.UninstallPluginRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) UninstallPlugin(_ context.Context, req *sdkv1.UninstallPluginRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	// 卸载只允许管理员名单内的插件执行（自身也在名单内时受同一约束）。
 	// 管理鉴权键 = 连接绑定的 manifest id（connectionID），不是可被冒用的注册名。
 	if !hostAdminAuthorized(s.connectionID()) {
-		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权卸载插件（需宿主授权为管理插件）", s.identity())
+		return nil, Errorf(CodePermissionDenied, "插件 %q 无权卸载插件（需宿主授权为管理插件）", s.identity())
 	}
 	h := getHostHooks()
 	if h.UninstallPlugin == nil {
@@ -2157,7 +1978,7 @@ func (s *hostServiceServer) UninstallPlugin(_ context.Context, req *sdkv1.Uninst
 // ListCommandDescriptors returns JSON-serialized command descriptors for all
 // plugins (commands/sub-commands/groups/aliases/permission/description),
 // consumed by helps-like plugins that enumerate commands across processes.
-func (s *hostServiceServer) ListCommandDescriptors(_ context.Context, _ *sdkv1.Empty) (*sdkv1.CommandDescriptorsResponse, error) {
+func (s *HostServiceServer) ListCommandDescriptors(_ context.Context, _ *sdkv1.Empty) (*sdkv1.CommandDescriptorsResponse, error) {
 	h := getHostHooks()
 	if h.ListCommandDescriptors == nil {
 		return &sdkv1.CommandDescriptorsResponse{}, nil
@@ -2173,7 +1994,7 @@ func (s *hostServiceServer) ListCommandDescriptors(_ context.Context, _ *sdkv1.E
 	return resp, nil
 }
 
-func (s *hostServiceServer) ListPlatforms(_ context.Context, _ *sdkv1.Empty) (*sdkv1.PlatformsResponse, error) {
+func (s *HostServiceServer) ListPlatforms(_ context.Context, _ *sdkv1.Empty) (*sdkv1.PlatformsResponse, error) {
 	h := getHostHooks()
 	if h.ListPlatforms == nil {
 		return &sdkv1.PlatformsResponse{}, nil
@@ -2193,11 +2014,11 @@ func (s *hostServiceServer) ListPlatforms(_ context.Context, _ *sdkv1.Empty) (*s
 // feeds matching inbound events back via PluginService.FeedSessionWait).
 // pluginName 从连接身份注入（s.pluginID，Register 后为注册名），宿主凭此
 // 关联等待与插件实例。
-func (s *hostServiceServer) RegisterSessionWait(_ context.Context, req *sdkv1.RegisterSessionWaitRequest) (*sdkv1.RegisterSessionWaitResponse, error) {
+func (s *HostServiceServer) RegisterSessionWait(_ context.Context, req *sdkv1.RegisterSessionWaitRequest) (*sdkv1.RegisterSessionWaitResponse, error) {
 	// 空身份时拒绝注册：宿主无法把等待归属到任何插件，避免记录无主等待
 	//（26-5）；同时归入控制面最小鉴权（26-2）。
 	if s.identity() == "" {
-		return nil, status.Error(codes.FailedPrecondition, "cannot register session wait without a bound plugin identity")
+		return nil, Error(CodeFailedPrecondition, "cannot register session wait without a bound plugin identity")
 	}
 	h := getHostHooks()
 	if h.RegisterSessionWait == nil {
@@ -2219,7 +2040,7 @@ func (s *hostServiceServer) RegisterSessionWait(_ context.Context, req *sdkv1.Re
 }
 
 // UnregisterSessionWait removes a previously registered session wait.
-func (s *hostServiceServer) UnregisterSessionWait(_ context.Context, req *sdkv1.UnregisterSessionWaitRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) UnregisterSessionWait(_ context.Context, req *sdkv1.UnregisterSessionWaitRequest) (*sdkv1.Empty, error) {
 	// 对齐 RegisterSessionWait 的控制面最小鉴权：注销等待同样需要绑定身份。
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
@@ -2231,7 +2052,7 @@ func (s *hostServiceServer) UnregisterSessionWait(_ context.Context, req *sdkv1.
 	strict := s.sessionWaitHasID
 	s.sessionWaitMu.Unlock()
 	if strict && !owned {
-		return nil, status.Errorf(codes.PermissionDenied, "插件 %q 无权注销未注册的 wait_id", s.identity())
+		return nil, Errorf(CodePermissionDenied, "插件 %q 无权注销未注册的 wait_id", s.identity())
 	}
 	h := getHostHooks()
 	if h.UnregisterSessionWait == nil {
@@ -2245,9 +2066,9 @@ func (s *hostServiceServer) UnregisterSessionWait(_ context.Context, req *sdkv1.
 // pluginName 从连接身份注入（s.pluginID），宿主凭此关联钩子与插件实例。
 // 空身份时拒绝（对齐 RegisterSessionWait 的控制面最小鉴权），避免登记无主
 // 钩子。
-func (s *hostServiceServer) RegisterBridgeHook(_ context.Context, req *sdkv1.BridgeHookRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) RegisterBridgeHook(_ context.Context, req *sdkv1.BridgeHookRequest) (*sdkv1.Empty, error) {
 	if s.identity() == "" {
-		return nil, status.Error(codes.FailedPrecondition, "cannot register bridge hook without a bound plugin identity")
+		return nil, Error(CodeFailedPrecondition, "cannot register bridge hook without a bound plugin identity")
 	}
 	h := getHostHooks()
 	if h.RegisterBridgeHook == nil {
@@ -2261,7 +2082,7 @@ func (s *hostServiceServer) RegisterBridgeHook(_ context.Context, req *sdkv1.Bri
 
 // UnregisterBridgeHook 注销插件到宿主的桥接钩子。与 Register 对称地要求
 // 绑定身份：匿名连接不得注销任何钩子。
-func (s *hostServiceServer) UnregisterBridgeHook(_ context.Context, req *sdkv1.BridgeHookRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) UnregisterBridgeHook(_ context.Context, req *sdkv1.BridgeHookRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
@@ -2276,13 +2097,13 @@ func (s *hostServiceServer) UnregisterBridgeHook(_ context.Context, req *sdkv1.B
 }
 
 // CreateBlob 把插件的大二进制交由宿主持久化，返回受控 FileReference handle。
-func (s *hostServiceServer) CreateBlob(_ context.Context, req *sdkv1.CreateBlobRequest) (*sdkv1.CreateBlobResponse, error) {
+func (s *HostServiceServer) CreateBlob(_ context.Context, req *sdkv1.CreateBlobRequest) (*sdkv1.CreateBlobResponse, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	h := getHostHooks()
 	if h.CreateBlob == nil {
-		return nil, status.Error(codes.Unimplemented, "host blob store not configured")
+		return nil, Error(CodeUnimplemented, "host blob store not configured")
 	}
 	ref, err := h.CreateBlob(req.Data, req.MimeType, req.Filename, req.TtlSeconds)
 	if err != nil {
@@ -2292,13 +2113,13 @@ func (s *hostServiceServer) CreateBlob(_ context.Context, req *sdkv1.CreateBlobR
 }
 
 // ReadBlob 按 offset/limit 分块读宿主 blob。
-func (s *hostServiceServer) ReadBlob(_ context.Context, req *sdkv1.ReadBlobRequest) (*sdkv1.ReadBlobResponse, error) {
+func (s *HostServiceServer) ReadBlob(_ context.Context, req *sdkv1.ReadBlobRequest) (*sdkv1.ReadBlobResponse, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	h := getHostHooks()
 	if h.ReadBlob == nil {
-		return nil, status.Error(codes.Unimplemented, "host blob store not configured")
+		return nil, Error(CodeUnimplemented, "host blob store not configured")
 	}
 	data, eof, total, err := h.ReadBlob(req.HandleId, req.Offset, req.Limit)
 	if err != nil {
@@ -2308,13 +2129,13 @@ func (s *hostServiceServer) ReadBlob(_ context.Context, req *sdkv1.ReadBlobReque
 }
 
 // GetBlobInfo 返回 blob 元数据。
-func (s *hostServiceServer) GetBlobInfo(_ context.Context, req *sdkv1.GetBlobInfoRequest) (*sdkv1.GetBlobInfoResponse, error) {
+func (s *HostServiceServer) GetBlobInfo(_ context.Context, req *sdkv1.GetBlobInfoRequest) (*sdkv1.GetBlobInfoResponse, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	h := getHostHooks()
 	if h.GetBlobInfo == nil {
-		return nil, status.Error(codes.Unimplemented, "host blob store not configured")
+		return nil, Error(CodeUnimplemented, "host blob store not configured")
 	}
 	ref, err := h.GetBlobInfo(req.HandleId)
 	if err != nil {
@@ -2324,7 +2145,7 @@ func (s *hostServiceServer) GetBlobInfo(_ context.Context, req *sdkv1.GetBlobInf
 }
 
 // ReleaseBlob 主动释放 blob（最终删除由宿主 TTL/GC 判定）。
-func (s *hostServiceServer) ReleaseBlob(_ context.Context, req *sdkv1.ReleaseBlobRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) ReleaseBlob(_ context.Context, req *sdkv1.ReleaseBlobRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
@@ -2339,7 +2160,7 @@ func (s *hostServiceServer) ReleaseBlob(_ context.Context, req *sdkv1.ReleaseBlo
 }
 
 // ListSkills 返回宿主技能管理器中的全部技能（每条 SkillInfo JSON）。
-func (s *hostServiceServer) ListSkills(_ context.Context, _ *sdkv1.Empty) (*sdkv1.SkillsResponse, error) {
+func (s *HostServiceServer) ListSkills(_ context.Context, _ *sdkv1.Empty) (*sdkv1.SkillsResponse, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
@@ -2359,7 +2180,7 @@ func (s *hostServiceServer) ListSkills(_ context.Context, _ *sdkv1.Empty) (*sdkv
 }
 
 // SetSkillActive 启用/禁用指定技能。
-func (s *hostServiceServer) SetSkillActive(_ context.Context, req *sdkv1.SetSkillActiveRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) SetSkillActive(_ context.Context, req *sdkv1.SetSkillActiveRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
@@ -2374,7 +2195,7 @@ func (s *hostServiceServer) SetSkillActive(_ context.Context, req *sdkv1.SetSkil
 }
 
 // DeleteSkill 删除指定技能。
-func (s *hostServiceServer) DeleteSkill(_ context.Context, req *sdkv1.DeleteSkillRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) DeleteSkill(_ context.Context, req *sdkv1.DeleteSkillRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
@@ -2389,7 +2210,7 @@ func (s *hostServiceServer) DeleteSkill(_ context.Context, req *sdkv1.DeleteSkil
 }
 
 // GetPlatformMessageHistory 按平台/用户取最近 limit 条平台消息记录。
-func (s *hostServiceServer) GetPlatformMessageHistory(_ context.Context, req *sdkv1.GetPMHistoryRequest) (*sdkv1.PMHistoryRecordsResponse, error) {
+func (s *HostServiceServer) GetPlatformMessageHistory(_ context.Context, req *sdkv1.GetPMHistoryRequest) (*sdkv1.PMHistoryRecordsResponse, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
@@ -2409,7 +2230,7 @@ func (s *hostServiceServer) GetPlatformMessageHistory(_ context.Context, req *sd
 }
 
 // InsertPlatformMessageHistory 插入一条平台消息记录（content 为 JSON，宿主存原样）。
-func (s *hostServiceServer) InsertPlatformMessageHistory(_ context.Context, req *sdkv1.InsertPMHistoryRequest) (*sdkv1.PMHistoryRecordResponse, error) {
+func (s *HostServiceServer) InsertPlatformMessageHistory(_ context.Context, req *sdkv1.InsertPMHistoryRequest) (*sdkv1.PMHistoryRecordResponse, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
@@ -2430,7 +2251,7 @@ func (s *hostServiceServer) InsertPlatformMessageHistory(_ context.Context, req 
 }
 
 // UpdatePlatformMessageHistory 更新一条记录（content 可选；llm_checkpoint_id 空表示不更新）。
-func (s *hostServiceServer) UpdatePlatformMessageHistory(_ context.Context, req *sdkv1.UpdatePMHistoryRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) UpdatePlatformMessageHistory(_ context.Context, req *sdkv1.UpdatePMHistoryRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
@@ -2449,7 +2270,7 @@ func (s *hostServiceServer) UpdatePlatformMessageHistory(_ context.Context, req 
 }
 
 // DeletePlatformMessageHistory 按 ID 删除一条平台消息记录。
-func (s *hostServiceServer) DeletePlatformMessageHistory(_ context.Context, req *sdkv1.DeletePMHistoryRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) DeletePlatformMessageHistory(_ context.Context, req *sdkv1.DeletePMHistoryRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
@@ -2464,13 +2285,13 @@ func (s *hostServiceServer) DeletePlatformMessageHistory(_ context.Context, req 
 }
 
 // ListSkillsV2 带过滤参数的技能列表（active_only/runtime/show_sandbox_path）。
-func (s *hostServiceServer) ListSkillsV2(_ context.Context, req *sdkv1.ListSkillsV2Request) (*sdkv1.SkillsResponse, error) {
+func (s *HostServiceServer) ListSkillsV2(_ context.Context, req *sdkv1.ListSkillsV2Request) (*sdkv1.SkillsResponse, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	h := getHostHooks()
 	if h.ListSkillsV2 == nil {
-		return nil, status.Error(codes.Unimplemented, "host hook ListSkillsV2 not configured")
+		return nil, Error(CodeUnimplemented, "host hook ListSkillsV2 not configured")
 	}
 	resp := &sdkv1.SkillsResponse{}
 	for _, x := range h.ListSkillsV2(req.GetActiveOnly(), req.GetRuntime(), req.GetShowSandboxPath()) {
@@ -2484,13 +2305,13 @@ func (s *hostServiceServer) ListSkillsV2(_ context.Context, req *sdkv1.ListSkill
 }
 
 // KBRetrieve 检索宿主知识库，返回拼接上下文文本与结果 JSON 数组。
-func (s *hostServiceServer) KBRetrieve(_ context.Context, req *sdkv1.KBRetrieveRequest) (*sdkv1.KBRetrieveResponse, error) {
+func (s *HostServiceServer) KBRetrieve(_ context.Context, req *sdkv1.KBRetrieveRequest) (*sdkv1.KBRetrieveResponse, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	h := getHostHooks()
 	if h.KBRetrieve == nil {
-		return nil, status.Error(codes.Unimplemented, "host hook KBRetrieve not configured")
+		return nil, Error(CodeUnimplemented, "host hook KBRetrieve not configured")
 	}
 	contextText, resultsJSON, err := h.KBRetrieve(req.GetQuery(), req.GetKbNames(), int(req.GetTopKFusion()), int(req.GetTopMFinal()))
 	if err != nil {
@@ -2503,13 +2324,13 @@ func (s *hostServiceServer) KBRetrieve(_ context.Context, req *sdkv1.KBRetrieveR
 }
 
 // KBUploadFromURL 让宿主从 URL 拉取文档写入指定知识库并分块。
-func (s *hostServiceServer) KBUploadFromURL(_ context.Context, req *sdkv1.KBUploadFromURLRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) KBUploadFromURL(_ context.Context, req *sdkv1.KBUploadFromURLRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	h := getHostHooks()
 	if h.KBUploadFromURL == nil {
-		return nil, status.Error(codes.Unimplemented, "host hook KBUploadFromURL not configured")
+		return nil, Error(CodeUnimplemented, "host hook KBUploadFromURL not configured")
 	}
 	if err := h.KBUploadFromURL(req.GetKbId(), req.GetUrl(), int(req.GetChunkSize()), int(req.GetChunkOverlap())); err != nil {
 		return nil, err
@@ -2518,13 +2339,13 @@ func (s *hostServiceServer) KBUploadFromURL(_ context.Context, req *sdkv1.KBUplo
 }
 
 // KBListKBs 列出宿主全部知识库元数据（每项 KnowledgeBase 结构 JSON）。
-func (s *hostServiceServer) KBListKBs(_ context.Context, _ *sdkv1.Empty) (*sdkv1.KBListResponse, error) {
+func (s *HostServiceServer) KBListKBs(_ context.Context, _ *sdkv1.Empty) (*sdkv1.KBListResponse, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	h := getHostHooks()
 	if h.KBListKBs == nil {
-		return nil, status.Error(codes.Unimplemented, "host hook KBListKBs not configured")
+		return nil, Error(CodeUnimplemented, "host hook KBListKBs not configured")
 	}
 	resp := &sdkv1.KBListResponse{}
 	for _, k := range h.KBListKBs() {
@@ -2538,13 +2359,13 @@ func (s *hostServiceServer) KBListKBs(_ context.Context, _ *sdkv1.Empty) (*sdkv1
 }
 
 // RegisterFileToken 把宿主侧文件路径登记为随机不可枚举令牌。
-func (s *hostServiceServer) RegisterFileToken(_ context.Context, req *sdkv1.RegisterFileTokenRequest) (*sdkv1.RegisterFileTokenResponse, error) {
+func (s *HostServiceServer) RegisterFileToken(_ context.Context, req *sdkv1.RegisterFileTokenRequest) (*sdkv1.RegisterFileTokenResponse, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	h := getHostHooks()
 	if h.RegisterFileToken == nil {
-		return nil, status.Error(codes.Unimplemented, "host hook RegisterFileToken not configured")
+		return nil, Error(CodeUnimplemented, "host hook RegisterFileToken not configured")
 	}
 	token, err := h.RegisterFileToken(req.GetPath(), req.GetTimeoutSec())
 	if err != nil {
@@ -2554,18 +2375,18 @@ func (s *hostServiceServer) RegisterFileToken(_ context.Context, req *sdkv1.Regi
 }
 
 // CronCreate 创建定时任务，返回宿主 Job 快照 JSON。
-func (s *hostServiceServer) CronCreate(_ context.Context, req *sdkv1.CronCreateRequest) (*sdkv1.CronJobResponse, error) {
+func (s *HostServiceServer) CronCreate(_ context.Context, req *sdkv1.CronCreateRequest) (*sdkv1.CronJobResponse, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	h := getHostHooks()
 	if h.CronCreate == nil {
-		return nil, status.Error(codes.Unimplemented, "host hook CronCreate not configured")
+		return nil, Error(CodeUnimplemented, "host hook CronCreate not configured")
 	}
 	var payload map[string]any
 	if len(req.GetPayloadJson()) > 0 {
 		if err := json.Unmarshal(req.GetPayloadJson(), &payload); err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "payload_json decode failed: %v", err)
+			return nil, Errorf(CodeInvalidArgument, "payload_json decode failed: %v", err)
 		}
 	}
 	job, err := h.CronCreate(&CronCreateSpec{
@@ -2594,18 +2415,18 @@ func (s *hostServiceServer) CronCreate(_ context.Context, req *sdkv1.CronCreateR
 }
 
 // CronUpdate 按 job_id 更新任务字段（fields_json 部分更新语义）。
-func (s *hostServiceServer) CronUpdate(_ context.Context, req *sdkv1.CronUpdateRequest) (*sdkv1.CronJobResponse, error) {
+func (s *HostServiceServer) CronUpdate(_ context.Context, req *sdkv1.CronUpdateRequest) (*sdkv1.CronJobResponse, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	h := getHostHooks()
 	if h.CronUpdate == nil {
-		return nil, status.Error(codes.Unimplemented, "host hook CronUpdate not configured")
+		return nil, Error(CodeUnimplemented, "host hook CronUpdate not configured")
 	}
 	fields := map[string]any{}
 	if len(req.GetFieldsJson()) > 0 {
 		if err := json.Unmarshal(req.GetFieldsJson(), &fields); err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "fields_json decode failed: %v", err)
+			return nil, Errorf(CodeInvalidArgument, "fields_json decode failed: %v", err)
 		}
 	}
 	job, err := h.CronUpdate(req.GetJobId(), fields)
@@ -2620,13 +2441,13 @@ func (s *hostServiceServer) CronUpdate(_ context.Context, req *sdkv1.CronUpdateR
 }
 
 // CronDelete 删除指定定时任务。
-func (s *hostServiceServer) CronDelete(_ context.Context, req *sdkv1.CronDeleteRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) CronDelete(_ context.Context, req *sdkv1.CronDeleteRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	h := getHostHooks()
 	if h.CronDelete == nil {
-		return nil, status.Error(codes.Unimplemented, "host hook CronDelete not configured")
+		return nil, Error(CodeUnimplemented, "host hook CronDelete not configured")
 	}
 	if err := h.CronDelete(req.GetJobId()); err != nil {
 		return nil, err
@@ -2635,13 +2456,13 @@ func (s *hostServiceServer) CronDelete(_ context.Context, req *sdkv1.CronDeleteR
 }
 
 // CronList 列出定时任务（job_type 空 = 全部类型）。
-func (s *hostServiceServer) CronList(_ context.Context, req *sdkv1.CronListRequest) (*sdkv1.CronJobsResponse, error) {
+func (s *HostServiceServer) CronList(_ context.Context, req *sdkv1.CronListRequest) (*sdkv1.CronJobsResponse, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	h := getHostHooks()
 	if h.CronList == nil {
-		return nil, status.Error(codes.Unimplemented, "host hook CronList not configured")
+		return nil, Error(CodeUnimplemented, "host hook CronList not configured")
 	}
 	resp := &sdkv1.CronJobsResponse{}
 	for _, j := range h.CronList(req.GetJobType()) {
@@ -2655,13 +2476,13 @@ func (s *hostServiceServer) CronList(_ context.Context, req *sdkv1.CronListReque
 }
 
 // CronRunNow 立即触发一次指定任务。
-func (s *hostServiceServer) CronRunNow(_ context.Context, req *sdkv1.CronRunNowRequest) (*sdkv1.Empty, error) {
+func (s *HostServiceServer) CronRunNow(_ context.Context, req *sdkv1.CronRunNowRequest) (*sdkv1.Empty, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	h := getHostHooks()
 	if h.CronRunNow == nil {
-		return nil, status.Error(codes.Unimplemented, "host hook CronRunNow not configured")
+		return nil, Error(CodeUnimplemented, "host hook CronRunNow not configured")
 	}
 	if err := h.CronRunNow(req.GetJobId()); err != nil {
 		return nil, err
@@ -2671,13 +2492,13 @@ func (s *hostServiceServer) CronRunNow(_ context.Context, req *sdkv1.CronRunNowR
 
 // McpListTools 汇总宿主已连接 MCP server 的全部工具
 // （每项 {server, name, description, schema_json}）。
-func (s *hostServiceServer) McpListTools(_ context.Context, _ *sdkv1.Empty) (*sdkv1.McpToolsResponse, error) {
+func (s *HostServiceServer) McpListTools(_ context.Context, _ *sdkv1.Empty) (*sdkv1.McpToolsResponse, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	h := getHostHooks()
 	if h.McpListTools == nil {
-		return nil, status.Error(codes.Unimplemented, "host hook McpListTools not configured")
+		return nil, Error(CodeUnimplemented, "host hook McpListTools not configured")
 	}
 	resp := &sdkv1.McpToolsResponse{}
 	for _, t := range h.McpListTools() {
@@ -2692,18 +2513,18 @@ func (s *hostServiceServer) McpListTools(_ context.Context, _ *sdkv1.Empty) (*sd
 
 // McpCallTool 调用宿主侧 MCP 工具，返回完整结果 JSON / 纯文本摘要 /
 // 是否出错。
-func (s *hostServiceServer) McpCallTool(_ context.Context, req *sdkv1.McpCallToolRequest) (*sdkv1.McpCallToolResponse, error) {
+func (s *HostServiceServer) McpCallTool(_ context.Context, req *sdkv1.McpCallToolRequest) (*sdkv1.McpCallToolResponse, error) {
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
 	h := getHostHooks()
 	if h.McpCallTool == nil {
-		return nil, status.Error(codes.Unimplemented, "host hook McpCallTool not configured")
+		return nil, Error(CodeUnimplemented, "host hook McpCallTool not configured")
 	}
 	args := map[string]any{}
 	if len(req.GetArgumentsJson()) > 0 {
 		if err := json.Unmarshal(req.GetArgumentsJson(), &args); err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "arguments_json decode failed: %v", err)
+			return nil, Errorf(CodeInvalidArgument, "arguments_json decode failed: %v", err)
 		}
 	}
 	result, text, isError, err := h.McpCallTool(req.GetServer(), req.GetToolName(), args)
@@ -2726,7 +2547,7 @@ const maxChatLLMPerMinute = 30
 // SetPluginAdminList 配置。空集合表示无管理员插件（默认仅允许插件操作自身）。
 //
 // 清单语义 = manifest id 集合（不是注册名）：比对对象是连接绑定的
-// hostServiceServer.connectionID()。注册名由插件自报、可被重名冒用，绝不能
+// HostServiceServer.connectionID()。注册名由插件自报、可被重名冒用，绝不能
 // 作为鉴权键（p11）。
 var (
 	hostAdminListMu sync.RWMutex

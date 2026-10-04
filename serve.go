@@ -9,57 +9,38 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
-	"time"
 
 	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
-	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/go-plugin"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
-// Handshake is the go-plugin handshake shared between the host and plugins.
-// It must match exactly on both sides (defined here once, used by both).
-//
-// 版本纪律：行为不兼容的变更（字段语义变化、旧插件二进制无法与宿主正确
-// 交互）必须 bump ProtocolVersion，让握手期拦截不匹配的双方；新增字段或
-// 新增 RPC 不需要 bump（旧插件由 client.go 的 legacy 字段折叠与新 host 的
-// nil-result 兜底兼容）。
-var Handshake = plugin.HandshakeConfig{
-	ProtocolVersion:  1,
-	MagicCookieKey:   "ASTRBOT_PLUGIN_MAGIC_COOKIE",
-	MagicCookieValue: "astrbot-go-plugin-1",
-}
+// serveFunc starts the gRPC transport. It is registered by the gRPC transport
+// package's init(); Native plugins never import that package and never call
+// Serve (their main() does not run).
+var serveFunc func(*Plugin)
 
-// PluginMap is the go-plugin plugin map (single named service). Used by the
-// HOST as the client-side map when launching a plugin process.
-var PluginMap = map[string]plugin.Plugin{
-	"plugin_service": &PluginServiceGRPCPlugin{},
-}
+// SetServeFunc is called by the gRPC transport package to install the actual
+// go-plugin entry. Core stays grpc-free.
+func SetServeFunc(fn func(*Plugin)) { serveFunc = fn }
 
-// grpcServer is the plugin-side gRPC server factory. It raises the default
-// 4MB message cap so large payloads (base64 images,
-// long conversations) can be received/sent.
-func grpcServer(opts []grpc.ServerOption) *grpc.Server {
-	opts = append(opts,
-		grpc.MaxRecvMsgSize(maxGRPCMessageSize),
-		grpc.MaxSendMsgSize(maxGRPCMessageSize),
-	)
-	return plugin.DefaultGRPCServer(opts)
-}
-
-// Serve runs the plugin's main loop: it runs OnLoad, merges any handlers
-// registered via RegisterCommand/RegisterFilter/RegisterHook, then registers
-// with go-plugin and blocks until the host terminates the process. Call this
-// from main().
+// Serve runs the plugin's gRPC main loop. The real implementation lives in
+// transport/grpc (linked by the host-injected grpc entry for subprocess
+// plugins). Native plugins do not run main(), so this is never called there.
 func Serve(p *Plugin) {
-	if p == nil {
-		p = &Plugin{}
+	if serveFunc == nil {
+		fmt.Fprintln(os.Stderr, "[ASTRBOT] sdk.Serve: gRPC transport not linked; "+
+			"the gRPC runtime requires importing transport/grpc")
+		return
 	}
-	// 记录插件配置，供 Native 运行方式使用（main() 在 .so/.dll 加载后不会
-	// 执行，Native 入口 AstrBotNativeServe 通过 sdk.Register 拿到同一份配置）。
-	// gRPC 运行方式下此记录无副作用。
+	serveFunc(p)
+}
+
+// preparePlugin runs OnLoad and merges imperatively-registered handlers. Shared
+// by gRPC server construction and the Native direct entry so both see the full
+// handler set exactly once.
+func preparePlugin(p *Plugin) {
+	if p == nil {
+		return
+	}
 	Register(p)
 	if p.OnLoad != nil {
 		if err := p.OnLoad(); err != nil {
@@ -72,33 +53,27 @@ func Serve(p *Plugin) {
 			os.Exit(1)
 		}
 	}
-	// Merge imperatively-registered handlers (from init()/OnLoad) into the
-	// declarative struct so the Register RPC reports the full handler set.
 	global.drain(p)
-
-	logger := hclog.New(&hclog.LoggerOptions{
-		Name:   "astrbot-plugin." + p.Name,
-		Level:  hclog.Info,
-		Output: os.Stderr,
-	})
-	setServiceLogger(logger)
-	plugins := map[string]plugin.Plugin{
-		"plugin_service": &PluginServiceGRPCPlugin{Impl: p},
+	logMu.Lock()
+	if serviceLogger == nil {
+		serviceLogger = newStdLogger("astrbot-plugin." + p.Name)
 	}
-	plugin.Serve(&plugin.ServeConfig{
-		HandshakeConfig: Handshake,
-		Plugins:         plugins,
-		GRPCServer:      grpcServer,
-		Logger:          logger,
-	})
+	logMu.Unlock()
 }
 
-// serviceLogger is the plugin's hclog logger created in Serve. SetLogLevel
-// adjusts its level at runtime; guarded by logMu (Serve runs on the plugin's
-// main goroutine, SetLogLevel on a gRPC worker).
+// NewPluginService prepares p (OnLoad + registry drain) and returns its
+// host->plugin operation surface. The gRPC transport registers the result on
+// its server; the Native transport calls it directly, in-process.
+func NewPluginService(p *Plugin) PluginService {
+	preparePlugin(p)
+	return &serviceServer{impl: p}
+}
+
+// serviceLogger is the plugin's logger (default stdlib; the host may inject
+// its own). Guarded by logMu.
 var (
 	logMu         sync.Mutex
-	serviceLogger hclog.Logger
+	serviceLogger Logger
 )
 
 // registeredPlugin 是当前插件配置。gRPC 运行方式由 Serve 直接使用其入参；
@@ -134,26 +109,22 @@ func singleLine(s string) string {
 	return strings.ReplaceAll(s, "\t", " ")
 }
 
-func setServiceLogger(l hclog.Logger) {
+func setServiceLogger(l Logger) {
 	logMu.Lock()
 	serviceLogger = l
 	logMu.Unlock()
 }
 
-// logService returns the plugin's hclog logger (created in Serve) or a
-// throwaway stderr logger when it is not yet installed, so diagnostic lines
-// from serviceServer helpers always have somewhere to go.
-func logService() hclog.Logger {
+// logService returns the plugin's logger, or a throwaway stderr logger when it
+// is not yet installed, so diagnostic lines from serviceServer helpers always
+// have somewhere to go.
+func logService() Logger {
 	logMu.Lock()
 	defer logMu.Unlock()
 	if serviceLogger != nil {
 		return serviceLogger
 	}
-	return hclog.New(&hclog.LoggerOptions{
-		Name:   "astrbot-plugin",
-		Level:  hclog.Info,
-		Output: os.Stderr,
-	})
+	return newStdLogger("astrbot-plugin")
 }
 
 // safeErr runs fn and converts a handler panic into an error (instead of
@@ -168,75 +139,13 @@ func safeErr(fn func() error) (err error) {
 	return fn()
 }
 
-// PluginServiceGRPCPlugin implements go-plugin's GRPCPlugin for the plugin
-// service. The host obtains a *Client from it via GRPCClient.
-type PluginServiceGRPCPlugin struct {
-	plugin.NetRPCUnsupportedPlugin
-	Impl *Plugin
-}
-
-// GRPCServer registers the PluginService on the given gRPC server. It also
-// captures the go-plugin broker so plugins can dial the host's HostService
-// (reverse calls) lazily from handlers.
-func (p *PluginServiceGRPCPlugin) GRPCServer(broker *plugin.GRPCBroker, s *grpc.Server) error {
-	// Store the broker for plugin->host reverse calls (HostService).
-	if broker != nil {
-		setBroker(broker)
-		// go-plugin 的 broker ConnInfo 只在宿主 accept 后约 5s 内有效（内部
-		// timeoutWait 会删除未消费的 pending）。插件若不在窗口内 Dial 9000
-		// 并保持连接，后续反向调用（GetConfig/ChatLLM/SendMessage 等）会因
-		// ConnInfo 过期而永久超时。启动后立即预连接并缓存 hostSvc。
-		go func() {
-			// 宿主 accept 9000 发生在 Dispense（插件 GRPCServer 之后），
-			// 需稍候 ConnInfo 到达；循环重试直到缓存成功。
-			for i := 0; i < 20; i++ {
-				if _, err := hostServiceClient(); err == nil {
-					return
-				}
-				time.Sleep(250 * time.Millisecond)
-			}
-			logService().Error("预连接宿主 HostService 失败（broker ConnInfo 即将过期），" +
-				"本插件的反向调用（GetConfig/SendMessage/ChatLLM 等）可能永久不可用")
-		}()
-	}
-	sdkv1.RegisterPluginServiceServer(s, &serviceServer{impl: p.Impl})
-	return nil
-}
-
-// GRPCClient wraps the gRPC connection in a typed *Client for the host. It
-// also serves the HostService over the broker so plugins can call back into
-// the host (CallAction / SendMessage / RecallMessage / GetConfig / SetConfig /
-// ChatLLM); the server is stopped when the client is closed.
-func (p *PluginServiceGRPCPlugin) GRPCClient(ctx context.Context, broker *plugin.GRPCBroker, c *grpc.ClientConn) (any, error) {
-	client := NewClient(c)
-	if broker != nil {
-		srv, lis, server, err := acceptHostService(broker, HostServiceAppID)
-		if err == nil {
-			client.setHostServiceServer(srv, lis, server)
-		} else {
-			// 打 warn 日志：宿主端未能接受 HostService，插件将失去反向调用
-			// 能力（CallAction/SendMessage/GetConfig 等全部不可用）。只记录
-			// 错误本身，不含任何业务/敏感信息。
-			name := ""
-			if p.Impl != nil {
-				name = p.Impl.Name
-			}
-			hclog.New(&hclog.LoggerOptions{
-				Name:   "astrbot-plugin." + name,
-				Level:  hclog.Info,
-				Output: os.Stderr,
-			}).Warn("acceptHostService 失败：插件将无法反向调用宿主 HostService", "err", err)
-		}
-	}
-	return client, nil
-}
-
-// serviceServer implements sdkv1.PluginServiceServer, dispatching RPCs to the
+// serviceServer implements PluginService, dispatching RPCs to the
 // plugin author's declared handlers.
 type serviceServer struct {
-	sdkv1.UnimplementedPluginServiceServer
 	impl *Plugin
 }
+
+var _ PluginService = (*serviceServer)(nil)
 
 // marshalSchema 序列化 schema map。nil map 会得到字面量 "null"（宿主端
 // Unmarshal 后 map 为 nil，后续写入即 panic），统一归一为 "{}"；marshal
@@ -258,7 +167,7 @@ func (s *serviceServer) Register(ctx context.Context, req *sdkv1.RegisterRequest
 	// legacy event_json/chain_json，版本不匹配无法互操作 → 明确失败并提示
 	// 升级，不做 Legacy 回退）。
 	if req.GetProtocolVersion() != P1ProtocolVersion {
-		return nil, status.Errorf(codes.FailedPrecondition,
+		return nil, Errorf(CodeFailedPrecondition,
 			"protocol version mismatch: Host=%d SDK(P1)=%d; please upgrade the SDK or Host to the same protocol version",
 			req.GetProtocolVersion(), P1ProtocolVersion)
 	}
@@ -878,23 +787,16 @@ func (s *serviceServer) HealthCheck(context.Context, *sdkv1.Empty) (*sdkv1.Healt
 	return resp, nil
 }
 
-// SetLogLevel adjusts the plugin's logger level at runtime. The plugin's
-// hclog logger (created in Serve) is tuned so DEBUG/INFO/WARNING/ERROR lines
-// filter accordingly; "" (or an unknown name) falls back to Info, mirroring
-// the host's global level. CRITICAL (an AstrBot level hclog lacks) maps to
-// Error, the most restrictive hclog level.
+// SetLogLevel adjusts the plugin's logger level at runtime. "" or an unknown
+// name falls back to Info; CRITICAL maps to Error.
 func (s *serviceServer) SetLogLevel(_ context.Context, req *sdkv1.SetLogLevelRequest) (*sdkv1.Empty, error) {
 	name := strings.ToUpper(strings.TrimSpace(req.Level))
 	if name == "CRITICAL" {
 		name = "ERROR"
 	}
-	lvl := hclog.LevelFromString(name)
-	if lvl == hclog.NoLevel {
-		lvl = hclog.Info
-	}
 	logMu.Lock()
-	if serviceLogger != nil {
-		serviceLogger.SetLevel(lvl)
+	if l, ok := serviceLogger.(interface{ SetLevelName(string) }); ok {
+		l.SetLevelName(name)
 	}
 	logMu.Unlock()
 	return &sdkv1.Empty{}, nil
@@ -954,7 +856,7 @@ func (s *serviceServer) notifyHostWaitConsumed(w *SessionWait) {
 	if w == nil {
 		return
 	}
-	svc, err := hostServiceClient()
+	svc, err := hostServiceCaller()
 	if err != nil {
 		return
 	}
@@ -1132,7 +1034,19 @@ func (s *serviceServer) Cleanup(context.Context, *sdkv1.PluginRef) (*sdkv1.Empty
 // eventFromStrict 从 proto SDKEvent 还原 Event；nil（协议不匹配/缺事件）直接报错。
 func eventFromStrict(se *sdkv1.SDKEvent) (*Event, error) {
 	if se == nil {
-		return nil, status.Error(codes.InvalidArgument, "event is required (SDKEvent)")
+		return nil, Error(CodeInvalidArgument, "event is required (SDKEvent)")
 	}
 	return SDKEventToEvent(se), nil
+}
+
+// FeedCronJob / ManagePlugin are Python-shared-runtime features; a Go plugin
+// (single- or Native-process) does not implement them. They return
+// CodeUnimplemented, which the gRPC transport maps to gRPC UNIMPLEMENTED (the
+// behaviour the generated UnimplementedPluginServiceServer previously gave).
+func (s *serviceServer) FeedCronJob(context.Context, *sdkv1.FeedCronJobRequest) (*sdkv1.FeedCronJobResponse, error) {
+	return nil, Error(CodeUnimplemented, "FeedCronJob is not implemented by the Go plugin SDK")
+}
+
+func (s *serviceServer) ManagePlugin(context.Context, *sdkv1.ManagePluginRequest) (*sdkv1.ManagePluginResponse, error) {
+	return nil, Error(CodeUnimplemented, "ManagePlugin is not implemented by the Go plugin SDK")
 }

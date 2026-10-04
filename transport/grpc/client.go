@@ -1,18 +1,17 @@
-package sdk
+package grpctransport
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"net"
-	"os"
 	"time"
 
+	sdk "github.com/WaterGodFurina/Astrbot-go-plugin-sdk"
 	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
-	"github.com/hashicorp/go-hclog"
+	sdkv1grpc "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1grpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // maxGRPCMessageSize raises the gRPC message cap above the 4MB default so
@@ -42,28 +41,13 @@ func withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, defaultRPCTimeout)
 }
 
-// logWarnf emits a WARNING line through the plugin's serviceLogger, falling
-// back to a stderr hclog logger when Serve has not created one yet. Used on
-// degraded-but-continue paths so failures are not silent.
-func logWarnf(format string, args ...any) {
-	logMu.Lock()
-	l := serviceLogger
-	logMu.Unlock()
-	if l == nil {
-		l = hclog.New(&hclog.LoggerOptions{
-			Name:   "astrbot-plugin-sdk",
-			Level:  hclog.Info,
-			Output: os.Stderr,
-		})
-	}
-	l.Warn(fmt.Sprintf(format, args...))
-}
-
 // Client is the host-side, typed wrapper around the plugin's gRPC service.
 // The host obtains it from go-plugin's Client() (see PluginServiceGRPCPlugin.GRPCClient).
+var _ sdk.PluginClient = (*Client)(nil)
+
 type Client struct {
 	conn *grpc.ClientConn
-	svc  sdkv1.PluginServiceClient
+	svc  sdkv1grpc.PluginServiceClient
 
 	// pluginID 是多租户（python-shared 共享 Runtime）下本次调用目标插件的
 	// plugin_id；单插件进程为空。经 ForPlugin(id) 派生 per-plugin 视图后，
@@ -78,16 +62,16 @@ type Client struct {
 	// does not leak the listener or its serving goroutine.
 	hostSrv *grpc.Server
 	hostLis net.Listener
-	// hostSrvServer 是 accept 时创建的 per-connection hostServiceServer；
+	// hostSrvServer 是 accept 时创建的 per-connection sdk.HostServiceServer；
 	// Close() 用它清理宿主侧的连接登记与限流表条目（26-3）。
-	hostSrvServer *hostServiceServer
+	hostSrvServer *sdk.HostServiceServer
 }
 
 // NewClient wraps an existing gRPC connection.
 func NewClient(conn *grpc.ClientConn) *Client {
 	return &Client{
 		conn:     conn,
-		svc:      sdkv1.NewPluginServiceClient(conn),
+		svc:      sdkv1grpc.NewPluginServiceClient(conn),
 		ownsConn: true,
 	}
 }
@@ -95,7 +79,7 @@ func NewClient(conn *grpc.ClientConn) *Client {
 // ForPlugin 派生一个绑定 plugin_id 的共享视图（python-shared 多租户）：
 // 复用同一 gRPC 连接，之后所有 PluginService 调用自动携带该 plugin_id，
 // 宿主无需逐调用点改签名。Close() 不会关闭共享连接（ownsConn=false）。
-func (c *Client) ForPlugin(pluginID string) *Client {
+func (c *Client) ForPlugin(pluginID string) sdk.PluginClient {
 	if c == nil {
 		return nil
 	}
@@ -120,16 +104,16 @@ func (c *Client) PluginID() string {
 
 // Register fetches the plugin's metadata and handler descriptors.
 func (c *Client) Register(ctx context.Context) (*sdkv1.RegisterResponse, error) {
-	resp, err := c.svc.Register(ctx, &sdkv1.RegisterRequest{ProtocolVersion: P1ProtocolVersion, PluginId: c.pluginID}, rpcCallOpts...)
+	resp, err := c.svc.Register(ctx, &sdkv1.RegisterRequest{ProtocolVersion: sdk.P1ProtocolVersion, PluginId: c.pluginID}, rpcCallOpts...)
 	if err != nil {
 		return nil, err
 	}
 	// P1 协商：插件（serviceServer.Register）已校验 Host 版本；这里校验插件
 	// 上报的版本，不匹配明确失败。
-	if resp.GetProtocolVersion() != P1ProtocolVersion {
+	if resp.GetProtocolVersion() != sdk.P1ProtocolVersion {
 		return nil, status.Errorf(codes.FailedPrecondition,
 			"protocol version mismatch: SDK(plugin)=%d Host(P1)=%d; please upgrade the SDK or Host to the same protocol version",
-			resp.GetProtocolVersion(), P1ProtocolVersion)
+			resp.GetProtocolVersion(), sdk.P1ProtocolVersion)
 	}
 	return resp, nil
 }
@@ -155,7 +139,7 @@ func normalizeResult(respResult *sdkv1.EventResult, legacySent, legacyStop, lega
 // optional rich result chain (text + images + files). The *EventResult is
 // never nil: `result.Sent` reports whether the plugin performed a send
 // operation (legacy plugins fall back to the response's `sent` field).
-func (c *Client) HandleCommand(ctx context.Context, name string, args []string, se *sdkv1.SDKEvent) (string, []Component, *sdkv1.EventResult, error) {
+func (c *Client) HandleCommand(ctx context.Context, name string, args []string, se *sdkv1.SDKEvent) (string, []sdk.Component, *sdkv1.EventResult, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 	resp, err := c.svc.HandleCommand(ctx, &sdkv1.HandleCommandRequest{
@@ -167,7 +151,7 @@ func (c *Client) HandleCommand(ctx context.Context, name string, args []string, 
 	if err != nil {
 		return "", nil, &sdkv1.EventResult{}, err
 	}
-	return resp.Text, protoToComponents(resp.Chain), normalizeResult(resp.Result, resp.Sent, resp.Stop, false), nil
+	return resp.Text, sdk.ProtoToComponents(resp.Chain), normalizeResult(resp.Result, resp.Sent, resp.Stop, false), nil
 }
 
 // HandleFilter invokes a filter handler, returning whether the event may
@@ -188,18 +172,18 @@ func (c *Client) HandleFilter(ctx context.Context, name string, se *sdkv1.SDKEve
 // the (legacy-derived) pipeline-stop flag; the *EventResult is never nil and
 // `result.Sent` reports whether the plugin sent a message while running the
 // hook (legacy fallback included).
-func (c *Client) HandleHook(ctx context.Context, name string, se *sdkv1.SDKEvent, chain []Component) ([]Component, bool, *sdkv1.EventResult, error) {
+func (c *Client) HandleHook(ctx context.Context, name string, se *sdkv1.SDKEvent, chain []sdk.Component) ([]sdk.Component, bool, *sdkv1.EventResult, error) {
 	return c.handleHook(ctx, name, se, chain, nil)
 }
 
 // HandleHookWithPayload invokes a payload-carrying hook handler (on_llm_response,
 // on_using_llm_tool, on_llm_tool_respond, on_plugin_error, lifecycle hooks).
 // payload is JSON-marshaled into the RPC; pass nil for event-only hooks.
-func (c *Client) HandleHookWithPayload(ctx context.Context, name string, se *sdkv1.SDKEvent, chain []Component, payload any) ([]Component, bool, *sdkv1.EventResult, error) {
+func (c *Client) HandleHookWithPayload(ctx context.Context, name string, se *sdkv1.SDKEvent, chain []sdk.Component, payload any) ([]sdk.Component, bool, *sdkv1.EventResult, error) {
 	return c.handleHook(ctx, name, se, chain, payload)
 }
 
-func (c *Client) handleHook(ctx context.Context, name string, se *sdkv1.SDKEvent, chain []Component, payload any) ([]Component, bool, *sdkv1.EventResult, error) {
+func (c *Client) handleHook(ctx context.Context, name string, se *sdkv1.SDKEvent, chain []sdk.Component, payload any) ([]sdk.Component, bool, *sdkv1.EventResult, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 	var payloadJSON []byte
@@ -209,12 +193,12 @@ func (c *Client) handleHook(ctx context.Context, name string, se *sdkv1.SDKEvent
 			return chain, false, &sdkv1.EventResult{}, err
 		}
 	}
-	resp, err := c.svc.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: name, Event: se, Chain: componentsToProto(chain), PayloadJson: payloadJSON, PluginId: c.pluginID}, rpcCallOpts...)
+	resp, err := c.svc.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: name, Event: se, Chain: sdk.ComponentsToProto(chain), PayloadJson: payloadJSON, PluginId: c.pluginID}, rpcCallOpts...)
 	if err != nil {
 		return chain, false, &sdkv1.EventResult{}, err
 	}
 	if len(resp.Chain) > 0 {
-		chain = protoToComponents(resp.Chain)
+		chain = sdk.ProtoToComponents(resp.Chain)
 	}
 	res := normalizeResult(resp.Result, resp.Sent, resp.Stop, resp.Handled)
 	return chain, res.StopPropagation, res, nil
@@ -404,7 +388,7 @@ func (c *Client) Close() error {
 		// 清理该连接遗留的宿主侧状态（hostServers 登记 + 限流窗口），
 		// 避免表只增不减（26-3）。传 server 本身做归属比对，防止重载
 		// 竞态下误删后继连接的登记。
-		dropPluginHostState(c.hostSrvServer.connKey, c.hostSrvServer)
+		sdk.DropPluginHostState(c.hostSrvServer.ConnKey(), c.hostSrvServer)
 		c.hostSrvServer = nil
 	}
 	if c.ownsConn && c.conn != nil {
@@ -416,23 +400,7 @@ func (c *Client) Close() error {
 // setHostServiceServer records the HostService gRPC server + listener served
 // for this client so Close() can release them, plus the per-connection server
 // so Close() can drop the plugin's host-side state (26-3).
-func (c *Client) setHostServiceServer(srv *grpc.Server, lis net.Listener, server *hostServiceServer) {
-	c.hostSrv = srv
-	c.hostLis = lis
-	c.hostSrvServer = server
-}
-
-// AttachNativeHostService binds the HostService server the host started for a
-// Native plugin connection (see ServeHostServiceOnListener) to this Client, so
-// Close() stops the server and drops the plugin's host-side state. connKey is
-// the plugin manifest id used at accept time (the key in the hostServers map).
-func (c *Client) AttachNativeHostService(srv *grpc.Server, lis net.Listener, connKey string) {
-	if c == nil || srv == nil {
-		return
-	}
-	hostServersMu.Lock()
-	server := hostServers[connKey]
-	hostServersMu.Unlock()
+func (c *Client) setHostServiceServer(srv *grpc.Server, lis net.Listener, server *sdk.HostServiceServer) {
 	c.hostSrv = srv
 	c.hostLis = lis
 	c.hostSrvServer = server

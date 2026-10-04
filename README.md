@@ -3,7 +3,7 @@
 为 AstrBot（Go 版）编写插件的 Go SDK。插件支持两种**运行方式**（宿主侧按插件选择，同一份源码无需修改）：
 
 - **gRPC 子进程（默认）**：插件编译为可执行文件，以独立子进程运行，与宿主通过 gRPC（go-plugin）通信。进程隔离、可独立重启/卸载/闲置休眠。
-- **Native 进程内**：插件编译为进程内动态库（Unix `.so` / Windows `.dll`），与宿主共用进程地址空间，通信复用同一套 P1 protobuf/gRPC（本机回环）。性能更高、内存更省，但**无进程隔离**——崩溃可能影响宿主；更新/禁用/卸载需重启 AstrBot；不支持闲置休眠。
+- **Native 进程内**：插件编译为进程内动态库（Unix `.so`），由宿主 `plugin.Open` 加载并**直接函数调用**——不经 gRPC、不经 protobuf-RPC、不启动子进程。性能更高、内存更省，但**无进程隔离**——崩溃可能影响宿主；更新/禁用/卸载需重启 AstrBot；不支持闲置休眠。仅支持 Unix（Windows 无 Go `plugin`，`c-shared` 无法传 Go 接口）。
 
 SDK 是独立 module `github.com/WaterGodFurina/AstrBot-go-plugin-sdk`（作为依赖从 GitHub 拉取；开发时本地 clone 到 `~/astrbot-go-plugin-sdk`）。
 
@@ -43,26 +43,29 @@ func main() {
 
 ## Native 运行方式
 
-除了默认的 gRPC 子进程，宿主还支持把同一份插件源码构建为**进程内动态库**（Unix `-buildmode=plugin` 出 `.so`，Windows `-buildmode=c-shared` 出 `.dll`）加载到宿主进程。这就是 README 快速开始把 `&sdk.Plugin{...}` 提升为包级 `var plugin` 的原因：
+除了默认的 gRPC 子进程，宿主还支持把同一份插件源码构建为 **Native 进程内动态库**（Unix `-buildmode=plugin` 出 `.so`）用 `plugin.Open()` 加载到宿主进程，并**直接函数调用**插件接口——没有 gRPC、没有 protobuf-RPC、没有子进程、没有回环 socket。这就是 README 快速开始把 `&sdk.Plugin{...}` 提升为包级 `var plugin` 的原因：
 
-- gRPC 构建：`func main()` 执行 → `sdk.Serve(plugin)`，行为与今天完全一致。
-- Native 构建：`func main()` **不执行**。宿主在编译插件时注入一个生成文件 `native_entry.go`（package main，不改动作者源码），其中调用 `sdk.Register(plugin)` 把包级 `plugin` 交给 SDK，再进入 `sdk.NativeServe()`：
+- gRPC 构建：`func main()` 执行 → `sdk.Serve(plugin)`（宿主在编译时注入 `grpc_entry.go` 链接 gRPC 传输）。
+- Native 构建：`func main()` **不执行**。宿主在编译时注入生成文件 `native_entry.go`（package main，不改动作者源码），把包级 `plugin` 交给 Native 运行时：
 
   ```go
   // native_entry.go（宿主 Native 构建时自动注入，作者无需编写）
   package main
 
-  import sdk "github.com/WaterGodFurina/Astrbot-go-plugin-sdk"
+  import native "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/native"
 
-  func AstrBotNativeServe() int {
-      sdk.Register(plugin) // plugin 为作者源码的包级变量
-      return sdk.NativeServe()
+  func AstrBotNativePlugin(pluginID string) (native.Plugin, error) {
+      return native.Serve(plugin, pluginID)
   }
   ```
 
-`NativeServe()` 会在本机回环 listener 上启动插件服务（Unix 用 unix socket、Windows 用 `127.0.0.1` TCP），把地址写入宿主指定的 rendezvous 文件，并连接宿主的 HostService（反向调用），随后阻塞服务——**通信仍是同一套 P1 protobuf/gRPC**，插件上层 API 与 gRPC 运行方式完全一致，无需感知运行方式。
+宿主 `plugin.Open()` 后 `Lookup("AstrBotNativePlugin")` 并调用它：`native.Serve` 跑 `OnLoad`、在进程内构造绑定该插件身份的 HostService，并返回 `PluginService` 供宿主**直接调用**。插件上层 API 与 gRPC 运行方式完全一致，无需感知运行方式。
 
-> 要求 SDK **v1.7.0+**。宿主按插件选择运行方式（`plugins.json` manifest 的 `runtime` 字段），不写入插件的 `metadata.json`。
+> 要求 SDK **v1.9.0+**。宿主按插件选择运行方式（`plugins.json` manifest 的 `runtime` 字段），不写入插件的 `metadata.json`。
+
+### Native 依赖边界
+
+Native 插件只链接 SDK core + `gen/sdkv1`（protobuf 消息）。core 不导入 `google.golang.org/grpc`、`hashicorp/go-plugin`、`hashicorp/go-hclog`，因此 Native 插件构建**不下载、不链接**这些依赖（`go list -deps` 可验证）。protobuf 版本需与宿主一致（Go `plugin` 要求宿主与插件对共同链接包使用相同版本）。
 
 ### Native 生命周期注意事项
 
@@ -70,6 +73,7 @@ func main() {
 - 因此 Native 插件的重载只做可安全注销/注册的功能刷新（Command / Filter 等）；更新、禁用、卸载后新状态需**重启 AstrBot** 才完整生效。
 - Native 插件**不参与闲置休眠**（无法 kill/唤醒）。
 - Native 插件崩溃或内存问题可能影响宿主主进程——宿主侧会先弹风险警告，用户确认后才切换。
+- **仅支持 Unix**：Windows 无 Go `plugin`，`c-shared` 的 C ABI 无法传递 Go 接口，宿主会明确报错，请改用 gRPC 运行方式。
 
 ## 命令
 
@@ -353,7 +357,7 @@ if v, ok := cfg["key"]; ok {
 
 | 函数 | 说明 |
 |---|---|
-| `Register(p *Plugin)` | 记录插件配置（幂等；`Serve` 内部自动调用，Native 入口需要它，gRPC 下无副作用） |
+| `Register(p *Plugin)` | 记录插件配置（幂等；`Serve` / `native.Serve` 内部自动调用，一般无需手动调用） |
 | `RegisterCommand(cmd Command)` | 注册命令 |
 | `RegisterFilter(f Filter)` | 注册过滤器 |
 | `RegisterHook(h Hook)` | 注册钩子 |
@@ -368,7 +372,20 @@ if v, ok := cfg["key"]; ok {
 
 本地开发：clone 到 `~/astrbot-go-plugin-sdk`，宿主 go.mod 通过 `replace` 指向本地。提交后宿主切换到 GitHub 版本。
 
-协议：`proto/plugin.proto` 是宿主↔插件 gRPC 契约（PluginService + HostService）。Go 生成代码在 `gen/sdkv1/`（`buf generate` 重新生成）。**注意 `proto/plugin.proto` 与 Python SDK 仓库的 `proto/plugin.proto` 必须逐字节一致**（同一契约两端），改动需两边同步。
+协议：`proto/plugin.proto` 是宿主↔插件 gRPC 契约（PluginService + HostService）。**注意 `proto/plugin.proto` 与 Python SDK 仓库的 `proto/plugin.proto` 必须逐字节一致**（同一契约两端），改动需两边同步。
+
+Go 生成代码分两个包，以便 Native 构建不链接 gRPC：
+
+- `gen/sdkv1/`：protobuf 消息（无 grpc）。
+- `gen/sdkv1grpc/`：生成的服务代码（gRPC 客户端/服务端接口）。
+
+重新生成（`protoc-gen-go-grpc` 只能与消息同包生成，故用脚本把服务代码迁到独立包并生成类型别名）：
+
+```sh
+buf generate
+python3 scripts/split_grpc_pkg.py     # gen/sdkv1/plugin_grpc.pb.go -> gen/sdkv1grpc/
+python3 scripts/gen_core_ifaces.py    # 生成 core 的 PluginService/HostService 接口与 gRPC 反向适配
+```
 
 ## 协议与数据路径（P1）
 

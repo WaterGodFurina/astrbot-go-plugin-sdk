@@ -43,7 +43,7 @@
 // - protoc             (unknown)
 // source: plugin.proto
 
-package sdkv1
+package sdkv1grpc
 
 import (
 	context "context"
@@ -396,7 +396,6 @@ type PluginServiceServer interface {
 	//
 	// 单插件进程（python-grpc / python-isolated）不使用，返回 UNIMPLEMENTED。
 	ManagePlugin(context.Context, *ManagePluginRequest) (*ManagePluginResponse, error)
-	mustEmbedUnimplementedPluginServiceServer()
 }
 
 // UnimplementedPluginServiceServer must be embedded to have
@@ -461,7 +460,6 @@ func (UnimplementedPluginServiceServer) testEmbeddedByValue()                   
 // Use of this interface is not recommended, as added methods to PluginServiceServer will
 // result in compilation errors.
 type UnsafePluginServiceServer interface {
-	mustEmbedUnimplementedPluginServiceServer()
 }
 
 func RegisterPluginServiceServer(s grpc.ServiceRegistrar, srv PluginServiceServer) {
@@ -1809,7 +1807,6 @@ type HostServiceServer interface {
 	// McpCallTool 调用宿主侧 MCP 工具（server + tool_name + arguments_json），
 	// 返回完整结果 JSON / 纯文本摘要 / 是否出错。
 	McpCallTool(context.Context, *McpCallToolRequest) (*McpCallToolResponse, error)
-	mustEmbedUnimplementedHostServiceServer()
 }
 
 // UnimplementedHostServiceServer must be embedded to have
@@ -2003,7 +2000,6 @@ func (UnimplementedHostServiceServer) testEmbeddedByValue()                     
 // Use of this interface is not recommended, as added methods to HostServiceServer will
 // result in compilation errors.
 type UnsafeHostServiceServer interface {
-	mustEmbedUnimplementedHostServiceServer()
 }
 
 func RegisterHostServiceServer(s grpc.ServiceRegistrar, srv HostServiceServer) {
