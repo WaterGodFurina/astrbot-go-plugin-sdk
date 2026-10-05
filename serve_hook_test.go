@@ -6,8 +6,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-
-	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
 )
 
 // TestHandleHookDispatchTableCoversAllCategories 验证表驱动重构后分发表对
@@ -82,8 +80,8 @@ func TestHandleHookDispatchTableCoversAllCategories(t *testing.T) {
 			Handler: func(e *Event) error { seen = "generic_hook"; return nil },
 		}},
 	}
-	s := &serviceServer{impl: p}
-	testEvent := EventToSDKEvent(&Event{SenderID: "u1", MessageStr: "hello"})
+	s := NewPluginService(p)
+	testEvent := &Event{SenderID: "u1", MessageStr: "hello"}
 
 	cases := []struct {
 		name    string
@@ -117,14 +115,14 @@ func TestHandleHookDispatchTableCoversAllCategories(t *testing.T) {
 		default:
 			payloadJSON = mustJSON(v)
 		}
-		resp, err := s.HandleHook(context.Background(), &sdkv1.HandleHookRequest{
-			Name: c.name, Event: testEvent, PayloadJson: payloadJSON,
-		})
+		resp, err := s.HandleHook(context.Background(), c.name, testEvent, nil, payloadJSON)
 		if err != nil {
 			t.Fatalf("HandleHook(%s): %v", c.name, err)
 		}
-		if !resp.Handled || resp.Result == nil || !resp.Result.Handled {
-			t.Errorf("hook %s: want handled, got Handled=%v Result=%+v", c.name, resp.Handled, resp.Result)
+		// 原生 HandleHookResult.Result 是值类型（不再是 proto 指针），
+		// 直接读取 Handled 即可。
+		if !resp.Result.Handled {
+			t.Errorf("hook %s: want handled, got Result=%+v", c.name, resp.Result)
 		}
 		if seen != c.want {
 			t.Errorf("hook %s: handler saw %q, want %q", c.name, seen, c.want)
@@ -154,31 +152,31 @@ func TestHandleHookMatchSemantics(t *testing.T) {
 			{Name: "prio", Handler: func(e *Event) error { seen = "generic"; return nil }},
 		},
 	}
-	s := &serviceServer{impl: p}
+	s := NewPluginService(p)
 	ctx := context.Background()
 
 	// 未命中任何钩子：全部跳过，Handled=false
 	seen = ""
-	resp, err := s.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: "nope"})
+	resp, err := s.HandleHook(ctx, "nope", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("miss: %v", err)
 	}
-	if resp.Handled || seen != "" {
-		t.Fatalf("miss: want unhandled & no run, got Handled=%v seen=%q", resp.Handled, seen)
+	if resp.Result.Handled || seen != "" {
+		t.Fatalf("miss: want unhandled & no run, got Handled=%v seen=%q", resp.Result.Handled, seen)
 	}
 
 	// 同一切片内同名：只有首个执行
 	seen = ""
-	resp, err = s.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: "dup"})
-	if err != nil || !resp.Handled || seen != "dup-first" {
-		t.Fatalf("dup: want first same-name hook only, got seen=%q Handled=%v err=%v", seen, resp.Handled, err)
+	resp, err = s.HandleHook(ctx, "dup", nil, nil, nil)
+	if err != nil || !resp.Result.Handled || seen != "dup-first" {
+		t.Fatalf("dup: want first same-name hook only, got seen=%q Handled=%v err=%v", seen, resp.Result.Handled, err)
 	}
 
 	// 跨类别同名：result（表首）优先于 message / 通用 Hook
 	seen = ""
-	resp, err = s.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: "prio"})
-	if err != nil || !resp.Handled || seen != "result" {
-		t.Fatalf("prio: want result-category priority, got seen=%q Handled=%v err=%v", seen, resp.Handled, err)
+	resp, err = s.HandleHook(ctx, "prio", nil, nil, nil)
+	if err != nil || !resp.Result.Handled || seen != "result" {
+		t.Fatalf("prio: want result-category priority, got seen=%q Handled=%v err=%v", seen, resp.Result.Handled, err)
 	}
 }
 
@@ -190,12 +188,12 @@ func TestHandleHookNilHandlerStopsDispatch(t *testing.T) {
 		MessageHooks: []MessageHook{{Name: "x"}}, // Handler 为 nil
 		Hooks:        []Hook{{Name: "x", Handler: func(e *Event) error { ran = true; return nil }}},
 	}
-	s := &serviceServer{impl: p}
-	resp, err := s.HandleHook(context.Background(), &sdkv1.HandleHookRequest{Name: "x"})
+	s := NewPluginService(p)
+	resp, err := s.HandleHook(context.Background(), "x", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("nil handler: %v", err)
 	}
-	if resp.Handled {
+	if resp.Result.Handled {
 		t.Errorf("nil handler: want Handled=false, got %+v", resp)
 	}
 	if ran {
@@ -235,7 +233,7 @@ func TestHandleHookErrorAndPanic(t *testing.T) {
 		},
 	}
 	for _, c := range cases {
-		resp, err := (&serviceServer{impl: c.p}).HandleHook(context.Background(), &sdkv1.HandleHookRequest{Name: "e"})
+		resp, err := NewPluginService(c.p).HandleHook(context.Background(), "e", nil, nil, nil)
 		if err == nil || !strings.Contains(err.Error(), c.wantErr) {
 			t.Errorf("%s: want error containing %q, got resp=%+v err=%v", c.name, c.wantErr, resp, err)
 		}
@@ -244,8 +242,7 @@ func TestHandleHookErrorAndPanic(t *testing.T) {
 
 // TestHandleHookResultHookEventFilter 验证 result 钩子的事件白名单：
 // 事件缺省视为 on_decorating_result；不匹配事件的条目跳过但继续扫描同切片
-// 中后续同名钩子；Stop 写回 resp.Stop 且 markHandled 之后 EventResult 也能
-// 读到最终 Stop。
+// 中后续同名钩子；Stop 写回 EventResult.StopPropagation。
 func TestHandleHookResultHookEventFilter(t *testing.T) {
 	seen := ""
 	p := &Plugin{ResultHooks: []ResultHook{
@@ -254,60 +251,61 @@ func TestHandleHookResultHookEventFilter(t *testing.T) {
 			seen = "bogus"
 			return chain, nil
 		}},
-		// 事件缺省 → 视为 on_decorating_result，命中；Stop 写回 resp
+		// 事件缺省 → 视为 on_decorating_result，命中；Stop 写回 EventResult
 		{Name: "r", Stop: true, Handler: func(e *Event, chain []Component) ([]Component, error) {
 			seen = "default"
 			return append(chain, Text("+d")), nil
 		}},
 	}}
-	s := &serviceServer{impl: p}
-	resp, err := s.HandleHook(context.Background(), &sdkv1.HandleHookRequest{
-		Name:  "r",
-		Chain: componentsToProto([]Component{Text("hi")}),
-	})
+	s := NewPluginService(p)
+	resp, err := s.HandleHook(context.Background(), "r", nil, []Component{Text("hi")}, nil)
 	if err != nil {
 		t.Fatalf("HandleHook: %v", err)
 	}
-	if !resp.Handled || seen != "default" {
-		t.Fatalf("want default-event hook handled, seen=%q Handled=%v", seen, resp.Handled)
+	if !resp.Result.Handled || seen != "default" {
+		t.Fatalf("want default-event hook handled, seen=%q Handled=%v", seen, resp.Result.Handled)
 	}
-	if !resp.Stop || resp.Result == nil || !resp.Result.StopPropagation {
-		t.Fatalf("want Stop mirrored to resp.Stop / Result.StopPropagation, got %+v", resp)
+	// 原生接口删除了旧的冗余 resp.Stop 字段：Stop 只体现在
+	// EventResult.StopPropagation 上。
+	if !resp.Result.StopPropagation {
+		t.Fatalf("want Stop mirrored to Result.StopPropagation, got %+v", resp)
 	}
-	chain := protoToComponents(resp.Chain)
+	chain := resp.Chain
 	if len(chain) != 2 || chain[1].Text != "+d" {
 		t.Fatalf("want decorated chain, got %+v", chain)
 	}
 
 	// 全部条目事件都不匹配 → 不命中，Handled=false
-	bad := &serviceServer{impl: &Plugin{ResultHooks: []ResultHook{{
+	bad := NewPluginService(&Plugin{ResultHooks: []ResultHook{{
 		Name: "r", Event: "bogus_event",
 		Handler: func(e *Event, chain []Component) ([]Component, error) { return chain, nil },
-	}}}}
-	resp2, err := bad.HandleHook(context.Background(), &sdkv1.HandleHookRequest{Name: "r"})
-	if err != nil || resp2.Handled {
+	}}})
+	resp2, err := bad.HandleHook(context.Background(), "r", nil, nil, nil)
+	if err != nil || resp2.Result.Handled {
 		t.Fatalf("non-whitelisted event: want unhandled, got resp=%+v err=%v", resp2, err)
 	}
 
 	// on_result_handling 也在白名单内
-	ok2 := &serviceServer{impl: &Plugin{ResultHooks: []ResultHook{{
+	ok2 := NewPluginService(&Plugin{ResultHooks: []ResultHook{{
 		Name: "r", Event: EventOnResultHandling,
 		Handler: func(e *Event, chain []Component) ([]Component, error) { return chain, nil },
-	}}}}
-	resp3, err := ok2.HandleHook(context.Background(), &sdkv1.HandleHookRequest{Name: "r"})
-	if err != nil || !resp3.Handled {
+	}}})
+	resp3, err := ok2.HandleHook(context.Background(), "r", nil, nil, nil)
+	if err != nil || !resp3.Result.Handled {
 		t.Fatalf("on_result_handling: want handled, got resp=%+v err=%v", resp3, err)
 	}
 }
 
 // TestHandleHookNilImpl 验证 impl 为 nil 时安全返回 Handled=false。
 func TestHandleHookNilImpl(t *testing.T) {
-	s := &serviceServer{}
-	resp, err := s.HandleHook(context.Background(), &sdkv1.HandleHookRequest{Name: "any"})
+	s := NewPluginService(nil)
+	resp, err := s.HandleHook(context.Background(), "any", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("nil impl: %v", err)
 	}
-	if resp.Handled || resp.Result != nil {
+	// 原生 HandleHookResult.Result 是值类型，无法为 nil；fail-closed 体现为
+	// 零值（Handled=false）且 Chain 为空。
+	if resp.Result.Handled || len(resp.Chain) != 0 {
 		t.Fatalf("nil impl: want empty unhandled response, got %+v", resp)
 	}
 }

@@ -5,13 +5,14 @@
 // Event conversions, the proto wire (Marshal/Unmarshal) and repeated Component
 // conversion for 100 KB and 1 MB events, plus a legacy JSON reference for
 // comparison (showing why the JSON path was removed).
-package sdk
+package grpctransport
 
 import (
 	"encoding/json"
 	"testing"
 
-	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
+	sdk "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/v2"
+	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/v2/gen/sdkv1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -19,7 +20,7 @@ import (
 // targetBytes (long text body + a plain text chain). The body appears in
 // several fields (MessageStr/PlainText/RawMessage + chain Plain), so it is
 // sized iteratively to converge on the target.
-func makeEvent(targetBytes int) *Event {
+func makeEvent(targetBytes int) *sdk.Event {
 	const unit = "这是一段用于 P1 数据面基准测试的长文本回复内容。"
 	body := unit
 	for {
@@ -33,8 +34,8 @@ func makeEvent(targetBytes int) *Event {
 	return buildEvent(body)
 }
 
-func buildEvent(body string) *Event {
-	return &Event{
+func buildEvent(body string) *sdk.Event {
+	return &sdk.Event{
 		Type:        "GroupMessage",
 		Platform:    "aiocqhttp",
 		PlatformID:  "1234567890",
@@ -61,7 +62,7 @@ func buildEvent(body string) *Event {
 			"flag":       true,
 			"null_field": nil,
 		},
-		Chain: []Component{
+		Chain: []sdk.Component{
 			{Type: "At", TargetID: "20002", Name: "测试用户"},
 			{Type: "Plain", Text: body},
 		},
@@ -69,7 +70,7 @@ func buildEvent(body string) *Event {
 }
 
 // eventWireSize reports the proto wire size of a SDKEvent derived from e.
-func eventWireSize(e *Event) int {
+func eventWireSize(e *sdk.Event) int {
 	return proto.Size(EventToSDKEvent(e))
 }
 
@@ -139,21 +140,21 @@ func benchJSONEventReference(b *testing.B, targetBytes int) {
 	}
 }
 
-func BenchmarkEventToSDKEvent100KB(b *testing.B)   { benchNativeEvent(b, 100<<10) }
-func BenchmarkEventToSDKEvent1MB(b *testing.B)     { benchNativeEvent(b, 1<<20) }
-func BenchmarkSDKEventToEvent100KB(b *testing.B)   { benchNativeEventReverse(b, 100<<10) }
-func BenchmarkSDKEventToEvent1MB(b *testing.B)     { benchNativeEventReverse(b, 1<<20) }
-func BenchmarkProtoMarshalSDKEvent100KB(b *testing.B) { benchProtoMarshal(b, 100<<10) }
-func BenchmarkProtoMarshalSDKEvent1MB(b *testing.B)   { benchProtoMarshal(b, 1<<20) }
+func BenchmarkEventToSDKEvent100KB(b *testing.B)        { benchNativeEvent(b, 100<<10) }
+func BenchmarkEventToSDKEvent1MB(b *testing.B)          { benchNativeEvent(b, 1<<20) }
+func BenchmarkSDKEventToEvent100KB(b *testing.B)        { benchNativeEventReverse(b, 100<<10) }
+func BenchmarkSDKEventToEvent1MB(b *testing.B)          { benchNativeEventReverse(b, 1<<20) }
+func BenchmarkProtoMarshalSDKEvent100KB(b *testing.B)   { benchProtoMarshal(b, 100<<10) }
+func BenchmarkProtoMarshalSDKEvent1MB(b *testing.B)     { benchProtoMarshal(b, 1<<20) }
 func BenchmarkProtoUnmarshalSDKEvent100KB(b *testing.B) { benchProtoUnmarshal(b, 100<<10) }
 func BenchmarkProtoUnmarshalSDKEvent1MB(b *testing.B)   { benchProtoUnmarshal(b, 1<<20) }
-func BenchmarkEventJSONReference100KB(b *testing.B) { benchJSONEventReference(b, 100<<10) }
-func BenchmarkEventJSONReference1MB(b *testing.B)   { benchJSONEventReference(b, 1<<20) }
+func BenchmarkEventJSONReference100KB(b *testing.B)     { benchJSONEventReference(b, 100<<10) }
+func BenchmarkEventJSONReference1MB(b *testing.B)       { benchJSONEventReference(b, 1<<20) }
 
 func BenchmarkComponentsToProto(b *testing.B) {
-	chain := make([]Component, 0, 64)
+	chain := make([]sdk.Component, 0, 64)
 	for i := 0; i < 64; i++ {
-		chain = append(chain, Component{Type: "Plain", Text: "第 N 行文本，用于组件转换基准。"})
+		chain = append(chain, sdk.Component{Type: "Plain", Text: "第 N 行文本，用于组件转换基准。"})
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -163,9 +164,9 @@ func BenchmarkComponentsToProto(b *testing.B) {
 }
 
 func BenchmarkProtoToComponents(b *testing.B) {
-	chain := make([]Component, 0, 64)
+	chain := make([]sdk.Component, 0, 64)
 	for i := 0; i < 64; i++ {
-		chain = append(chain, Component{Type: "Plain", Text: "第 N 行文本，用于组件转换基准。"})
+		chain = append(chain, sdk.Component{Type: "Plain", Text: "第 N 行文本，用于组件转换基准。"})
 	}
 	pc := componentsToProto(chain)
 	b.ReportAllocs()

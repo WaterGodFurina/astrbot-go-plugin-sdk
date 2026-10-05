@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	sdk "github.com/WaterGodFurina/Astrbot-go-plugin-sdk"
-	sdkv1grpc "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1grpc"
+	sdk "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/v2"
+	sdkv1grpc "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/v2/gen/sdkv1grpc"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
 	"google.golang.org/grpc"
@@ -105,7 +105,7 @@ func (p *PluginServiceGRPCPlugin) GRPCServer(broker *plugin.GRPCBroker, s *grpc.
 				Error("预连接宿主 HostService 失败，反向调用可能永久不可用")
 		}()
 	}
-	sdkv1grpc.RegisterPluginServiceServer(s, sdk.NewPluginService(p.Impl))
+	sdkv1grpc.RegisterPluginServiceServer(s, &pluginServiceServer{svc: sdk.NewPluginService(p.Impl)})
 	return nil
 }
 
@@ -149,7 +149,7 @@ func acceptHostService(b *plugin.GRPCBroker, id uint32) (*grpc.Server, net.Liste
 		sdk.HostServiceLogWarn("acceptHostService: 宿主未设置当前插件 id，控制面 RPC 将被拒绝")
 	}
 	server := sdk.NewHostServiceServer(pid, pid)
-	sdkv1grpc.RegisterHostServiceServer(srv, server)
+	sdkv1grpc.RegisterHostServiceServer(srv, &grpcHostServiceServer{host: server})
 	go func() { _ = srv.Serve(lis) }()
 	return srv, lis, server, nil
 }

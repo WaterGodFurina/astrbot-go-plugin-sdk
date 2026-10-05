@@ -20,7 +20,7 @@ import shutil
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MSG_DIR = os.path.join(ROOT, "gen", "sdkv1")
 GRPC_DIR = os.path.join(ROOT, "gen", "sdkv1grpc")
-GO_PKG = "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
+GO_PKG = "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/v2/gen/sdkv1"
 
 src_pb = os.path.join(MSG_DIR, "plugin.pb.go")
 src_grpc = os.path.join(MSG_DIR, "plugin_grpc.pb.go")

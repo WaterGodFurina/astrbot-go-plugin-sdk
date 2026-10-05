@@ -6,9 +6,9 @@ import (
 	"net"
 	"time"
 
-	sdk "github.com/WaterGodFurina/Astrbot-go-plugin-sdk"
-	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
-	sdkv1grpc "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1grpc"
+	sdk "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/v2"
+	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/v2/gen/sdkv1"
+	sdkv1grpc "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/v2/gen/sdkv1grpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -103,19 +103,19 @@ func (c *Client) PluginID() string {
 }
 
 // Register fetches the plugin's metadata and handler descriptors.
-func (c *Client) Register(ctx context.Context) (*sdkv1.RegisterResponse, error) {
+func (c *Client) Register(ctx context.Context) (sdk.PluginInfo, error) {
 	resp, err := c.svc.Register(ctx, &sdkv1.RegisterRequest{ProtocolVersion: sdk.P1ProtocolVersion, PluginId: c.pluginID}, rpcCallOpts...)
 	if err != nil {
-		return nil, err
+		return sdk.PluginInfo{}, err
 	}
 	// P1 协商：插件（serviceServer.Register）已校验 Host 版本；这里校验插件
 	// 上报的版本，不匹配明确失败。
 	if resp.GetProtocolVersion() != sdk.P1ProtocolVersion {
-		return nil, status.Errorf(codes.FailedPrecondition,
+		return sdk.PluginInfo{}, status.Errorf(codes.FailedPrecondition,
 			"protocol version mismatch: SDK(plugin)=%d Host(P1)=%d; please upgrade the SDK or Host to the same protocol version",
 			resp.GetProtocolVersion(), sdk.P1ProtocolVersion)
 	}
-	return resp, nil
+	return protoToPluginInfo(resp), nil
 }
 
 // normalizeResult resolves a plugin's EventResult for the host: new plugin
@@ -124,11 +124,11 @@ func (c *Client) Register(ctx context.Context) (*sdkv1.RegisterResponse, error) 
 // per-response bool fields (sent/stop/handled) are folded into an EventResult
 // here. Host callers can therefore read from the returned (never-nil) result
 // uniformly.
-func normalizeResult(respResult *sdkv1.EventResult, legacySent, legacyStop, legacyHandled bool) *sdkv1.EventResult {
+func normalizeResult(respResult *sdkv1.EventResult, legacySent, legacyStop, legacyHandled bool) sdk.EventResult {
 	if respResult != nil {
-		return respResult
+		return protoToEventResult(respResult)
 	}
-	return &sdkv1.EventResult{
+	return sdk.EventResult{
 		Handled:         legacyHandled,
 		Sent:            legacySent,
 		StopPropagation: legacyStop,
@@ -136,184 +136,211 @@ func normalizeResult(respResult *sdkv1.EventResult, legacySent, legacyStop, lega
 }
 
 // HandleCommand invokes a command handler, returning its text reply plus an
-// optional rich result chain (text + images + files). The *EventResult is
-// never nil: `result.Sent` reports whether the plugin performed a send
-// operation (legacy plugins fall back to the response's `sent` field).
-func (c *Client) HandleCommand(ctx context.Context, name string, args []string, se *sdkv1.SDKEvent) (string, []sdk.Component, *sdkv1.EventResult, error) {
+// optional rich result chain (text + images + files).
+func (c *Client) HandleCommand(ctx context.Context, name string, args []string, event *sdk.Event) (sdk.HandleCommandResult, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 	resp, err := c.svc.HandleCommand(ctx, &sdkv1.HandleCommandRequest{
 		Name:     name,
 		Args:     args,
-		Event:    se,
+		Event:    EventToSDKEvent(event),
 		PluginId: c.pluginID,
 	}, rpcCallOpts...)
 	if err != nil {
-		return "", nil, &sdkv1.EventResult{}, err
+		return sdk.HandleCommandResult{}, err
 	}
-	return resp.Text, sdk.ProtoToComponents(resp.Chain), normalizeResult(resp.Result, resp.Sent, resp.Stop, false), nil
+	return sdk.HandleCommandResult{
+		Text:   resp.Text,
+		Chain:  protoToComponents(resp.Chain),
+		Result: normalizeResult(resp.Result, resp.Sent, resp.Stop, false),
+	}, nil
 }
 
 // HandleFilter invokes a filter handler, returning whether the event may
-// continue. The *EventResult is never nil: `result.Sent` reports whether the
-// plugin sent a message while running the filter (legacy fallback included).
-func (c *Client) HandleFilter(ctx context.Context, name string, se *sdkv1.SDKEvent) (bool, *sdkv1.EventResult, error) {
+// continue.
+func (c *Client) HandleFilter(ctx context.Context, name string, event *sdk.Event) (sdk.HandleFilterResult, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	resp, err := c.svc.HandleFilter(ctx, &sdkv1.HandleFilterRequest{Name: name, Event: se, PluginId: c.pluginID}, rpcCallOpts...)
+	resp, err := c.svc.HandleFilter(ctx, &sdkv1.HandleFilterRequest{Name: name, Event: EventToSDKEvent(event), PluginId: c.pluginID}, rpcCallOpts...)
 	if err != nil {
-		return true, &sdkv1.EventResult{}, err
+		return sdk.HandleFilterResult{Allow: true}, err
 	}
-	return resp.Allow, normalizeResult(resp.Result, resp.Sent, false, false), nil
+	return sdk.HandleFilterResult{
+		Allow:  resp.Allow,
+		Result: normalizeResult(resp.Result, resp.Sent, false, false),
+	}, nil
 }
 
 // HandleHook invokes a hook handler. For result-decoration hooks, chain is the
-// current result chain and the (possibly decorated) chain is returned. stop is
-// the (legacy-derived) pipeline-stop flag; the *EventResult is never nil and
-// `result.Sent` reports whether the plugin sent a message while running the
-// hook (legacy fallback included).
-func (c *Client) HandleHook(ctx context.Context, name string, se *sdkv1.SDKEvent, chain []sdk.Component) ([]sdk.Component, bool, *sdkv1.EventResult, error) {
-	return c.handleHook(ctx, name, se, chain, nil)
+// current result chain and the (possibly decorated) chain is returned.
+func (c *Client) HandleHook(ctx context.Context, name string, event *sdk.Event, chain []sdk.Component) (sdk.HandleHookResult, error) {
+	return c.handleHook(ctx, name, event, chain, nil)
 }
 
 // HandleHookWithPayload invokes a payload-carrying hook handler (on_llm_response,
 // on_using_llm_tool, on_llm_tool_respond, on_plugin_error, lifecycle hooks).
 // payload is JSON-marshaled into the RPC; pass nil for event-only hooks.
-func (c *Client) HandleHookWithPayload(ctx context.Context, name string, se *sdkv1.SDKEvent, chain []sdk.Component, payload any) ([]sdk.Component, bool, *sdkv1.EventResult, error) {
-	return c.handleHook(ctx, name, se, chain, payload)
+func (c *Client) HandleHookWithPayload(ctx context.Context, name string, event *sdk.Event, chain []sdk.Component, payload any) (sdk.HandleHookResult, error) {
+	return c.handleHook(ctx, name, event, chain, payload)
 }
 
-func (c *Client) handleHook(ctx context.Context, name string, se *sdkv1.SDKEvent, chain []sdk.Component, payload any) ([]sdk.Component, bool, *sdkv1.EventResult, error) {
+func (c *Client) handleHook(ctx context.Context, name string, event *sdk.Event, chain []sdk.Component, payload any) (sdk.HandleHookResult, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 	var payloadJSON []byte
 	if payload != nil {
 		var err error
 		if payloadJSON, err = json.Marshal(payload); err != nil {
-			return chain, false, &sdkv1.EventResult{}, err
+			return sdk.HandleHookResult{Chain: chain}, err
 		}
 	}
-	resp, err := c.svc.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: name, Event: se, Chain: sdk.ComponentsToProto(chain), PayloadJson: payloadJSON, PluginId: c.pluginID}, rpcCallOpts...)
+	resp, err := c.svc.HandleHook(ctx, &sdkv1.HandleHookRequest{
+		Name:        name,
+		Event:       EventToSDKEvent(event),
+		Chain:       componentsToProto(chain),
+		PayloadJson: payloadJSON,
+		PluginId:    c.pluginID,
+	}, rpcCallOpts...)
 	if err != nil {
-		return chain, false, &sdkv1.EventResult{}, err
+		return sdk.HandleHookResult{Chain: chain}, err
 	}
 	if len(resp.Chain) > 0 {
-		chain = sdk.ProtoToComponents(resp.Chain)
+		chain = protoToComponents(resp.Chain)
 	}
-	res := normalizeResult(resp.Result, resp.Sent, resp.Stop, resp.Handled)
-	return chain, res.StopPropagation, res, nil
+	return sdk.HandleHookResult{
+		Chain:  chain,
+		Result: normalizeResult(resp.Result, resp.Sent, resp.Stop, resp.Handled),
+	}, nil
 }
 
 // HandleLLMRequest invokes an on_llm_request hook, returning the (possibly
-// modified) system prompt, the (possibly modified) user prompt, the stop
-// flag, and the EventResult (never nil; `result.Sent` reports plugin sends,
-// with legacy fallback).
-func (c *Client) HandleLLMRequest(ctx context.Context, name string, se *sdkv1.SDKEvent, systemPrompt, userPrompt string) (system, user string, stop bool, res *sdkv1.EventResult, err error) {
+// modified) system prompt, the (possibly modified) user prompt, the stop flag,
+// and the EventResult.
+func (c *Client) HandleLLMRequest(ctx context.Context, name string, event *sdk.Event, systemPrompt, userPrompt string) (sdk.HandleLLMRequestResult, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 	resp, err := c.svc.HandleLLMRequest(ctx, &sdkv1.HandleLLMRequestRequest{
 		Name:         name,
-		Event:        se,
+		Event:        EventToSDKEvent(event),
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
 		PluginId:     c.pluginID,
 	}, rpcCallOpts...)
 	if err != nil {
-		return systemPrompt, userPrompt, false, &sdkv1.EventResult{}, err
+		return sdk.HandleLLMRequestResult{SystemPrompt: systemPrompt, UserPrompt: userPrompt}, err
 	}
 	result := normalizeResult(resp.Result, resp.Sent, resp.Stop, false)
-	return resp.SystemPrompt, resp.UserPrompt, result.StopPropagation, result, nil
-}
-
-// ListWebApis returns the plugin's current Web API routes (pulled live:
-// plugin routes may be registered during instantiation, after Register).
-// ref 定位目标插件（共享 Runtime 多租户用 plugin_id；单插件进程可传 nil）。
-func (c *Client) ListWebApis(ctx context.Context, ref *sdkv1.PluginRef) ([]*sdkv1.WebApiDesc, error) {
-	if ref == nil {
-		ref = &sdkv1.PluginRef{PluginId: c.pluginID}
-	}
-	resp, err := c.svc.ListWebApis(ctx, ref, rpcCallOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return resp.GetWebApis(), nil
+	return sdk.HandleLLMRequestResult{
+		SystemPrompt: resp.SystemPrompt,
+		UserPrompt:   resp.UserPrompt,
+		Stop:         result.StopPropagation,
+		Result:       result,
+	}, nil
 }
 
 // ListTools returns the plugin's current LLM function tools (pulled live:
 // plugin tools are registered during instantiation, after Register).
-// ref 定位目标插件（共享 Runtime 多租户用 plugin_id；单插件进程可传 nil）。
-func (c *Client) ListTools(ctx context.Context, ref *sdkv1.PluginRef) ([]*sdkv1.ToolDesc, error) {
-	if ref == nil {
-		ref = &sdkv1.PluginRef{PluginId: c.pluginID}
-	}
-	resp, err := c.svc.ListTools(ctx, ref, rpcCallOpts...)
+func (c *Client) ListTools(ctx context.Context) ([]sdk.ToolDesc, error) {
+	resp, err := c.svc.ListTools(ctx, &sdkv1.PluginRef{PluginId: c.pluginID}, rpcCallOpts...)
 	if err != nil {
 		return nil, err
 	}
-	return resp.GetTools(), nil
+	out := make([]sdk.ToolDesc, 0, len(resp.GetTools()))
+	for _, t := range resp.GetTools() {
+		out = append(out, protoToToolDesc(t))
+	}
+	return out, nil
+}
+
+// ListWebApis returns the plugin's current Web API routes (pulled live:
+// plugin routes may be registered during instantiation, after Register).
+func (c *Client) ListWebApis(ctx context.Context) ([]sdk.WebAPIDesc, error) {
+	resp, err := c.svc.ListWebApis(ctx, &sdkv1.PluginRef{PluginId: c.pluginID}, rpcCallOpts...)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]sdk.WebAPIDesc, 0, len(resp.GetWebApis()))
+	for _, w := range resp.GetWebApis() {
+		out = append(out, protoToWebAPIDesc(w))
+	}
+	return out, nil
 }
 
 // GetConfigSchema returns the plugin's CURRENT config schema (JSON), which
 // plugins may refresh at runtime. The host falls back to the Register snapshot
 // when this RPC is unimplemented/empty.
-// ref 定位目标插件（共享 Runtime 多租户用 plugin_id；单插件进程可传 nil）。
-func (c *Client) GetConfigSchema(ctx context.Context, ref *sdkv1.PluginRef) ([]byte, error) {
-	if ref == nil {
-		ref = &sdkv1.PluginRef{PluginId: c.pluginID}
-	}
-	resp, err := c.svc.GetConfigSchema(ctx, ref, rpcCallOpts...)
+func (c *Client) GetConfigSchema(ctx context.Context) ([]byte, error) {
+	resp, err := c.svc.GetConfigSchema(ctx, &sdkv1.PluginRef{PluginId: c.pluginID}, rpcCallOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return resp.GetSchemaJson(), nil
 }
 
-// HandleTool invokes a registered LLM function tool. The *EventResult is never
-// nil: `result.Sent` reports whether the plugin sent a message while running
-// the tool (legacy fallback included).
-func (c *Client) HandleTool(ctx context.Context, name string, args map[string]any, se *sdkv1.SDKEvent) (string, bool, *sdkv1.EventResult, error) {
+// HandleTool invokes a registered LLM function tool.
+func (c *Client) HandleTool(ctx context.Context, name string, args map[string]any, event *sdk.Event) (sdk.HandleToolResult, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
-		return "", false, &sdkv1.EventResult{}, err
+		return sdk.HandleToolResult{}, err
 	}
 	resp, err := c.svc.HandleTool(ctx, &sdkv1.HandleToolRequest{
 		Name:     name,
 		ArgsJson: argsJSON,
-		Event:    se,
+		Event:    EventToSDKEvent(event),
 		PluginId: c.pluginID,
 	}, rpcCallOpts...)
 	if err != nil {
-		return "", false, &sdkv1.EventResult{}, err
+		return sdk.HandleToolResult{}, err
 	}
-	return resp.Text, resp.IsError, normalizeResult(resp.Result, resp.Sent, false, false), nil
+	return sdk.HandleToolResult{
+		Text:    resp.Text,
+		IsError: resp.IsError,
+		Result:  normalizeResult(resp.Result, resp.Sent, false, false),
+	}, nil
 }
 
 // HandleWebRequest dispatches a dashboard HTTP request to a plugin-registered
 // Web API (the host proxies /api/plug/<plugin>/<path> here). Returns the
 // response status, headers and body.
-func (c *Client) HandleWebRequest(ctx context.Context, req *sdkv1.HandleWebRequestRequest) (*sdkv1.HandleWebRequestResponse, error) {
+func (c *Client) HandleWebRequest(ctx context.Context, req sdk.HandleWebRequest) (sdk.HandleWebResponse, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	if req != nil && req.PluginId == "" {
-		req.PluginId = c.pluginID
+	pluginID := req.PluginID
+	if pluginID == "" {
+		pluginID = c.pluginID
 	}
-	return c.svc.HandleWebRequest(ctx, req, rpcCallOpts...)
+	resp, err := c.svc.HandleWebRequest(ctx, &sdkv1.HandleWebRequestRequest{
+		PluginId: pluginID,
+		Method:   req.Method,
+		Path:     req.Path,
+		Query:    mapToWebKV(req.Query),
+		Headers:  mapToWebKV(req.Headers),
+		Body:     req.Body,
+	}, rpcCallOpts...)
+	if err != nil {
+		return sdk.HandleWebResponse{}, err
+	}
+	return sdk.HandleWebResponse{
+		StatusCode: int(resp.GetStatusCode()),
+		Headers:    webKVToStrMap(resp.GetHeaders()),
+		Body:       resp.GetBody(),
+	}, nil
 }
 
 // HealthCheck probes the plugin's liveness.
-func (c *Client) HealthCheck(ctx context.Context) (*sdkv1.HealthResponse, error) {
-	return c.svc.HealthCheck(ctx, &sdkv1.Empty{}, rpcCallOpts...)
+func (c *Client) HealthCheck(ctx context.Context) (sdk.HealthInfo, error) {
+	resp, err := c.svc.HealthCheck(ctx, &sdkv1.Empty{}, rpcCallOpts...)
+	if err != nil {
+		return sdk.HealthInfo{}, err
+	}
+	return sdk.HealthInfo{OK: resp.GetOk(), Version: resp.GetVersion()}, nil
 }
 
 // Cleanup tells the plugin to run its unload hook.
-// ref 定位目标插件（共享 Runtime 多租户用 plugin_id；单插件进程可传 nil）。
-func (c *Client) Cleanup(ctx context.Context, ref *sdkv1.PluginRef) error {
-	if ref == nil {
-		ref = &sdkv1.PluginRef{PluginId: c.pluginID}
-	}
-	_, err := c.svc.Cleanup(ctx, ref, rpcCallOpts...)
+func (c *Client) Cleanup(ctx context.Context) error {
+	_, err := c.svc.Cleanup(ctx, &sdkv1.PluginRef{PluginId: c.pluginID}, rpcCallOpts...)
 	return err
 }
 
@@ -330,10 +357,10 @@ func (c *Client) SetLogLevel(ctx context.Context, level string) error {
 // session wait (session_waiter) can consume it. Returns handled=true when a
 // wait consumed the event. Old plugin binaries return UNIMPLEMENTED; the
 // caller should treat that as handled=false (no wait registered).
-func (c *Client) FeedSessionWait(ctx context.Context, se *sdkv1.SDKEvent) (bool, error) {
+func (c *Client) FeedSessionWait(ctx context.Context, event *sdk.Event) (bool, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	resp, err := c.svc.FeedSessionWait(ctx, &sdkv1.FeedSessionWaitRequest{Event: se, PluginId: c.pluginID}, rpcCallOpts...)
+	resp, err := c.svc.FeedSessionWait(ctx, &sdkv1.FeedSessionWaitRequest{Event: EventToSDKEvent(event), PluginId: c.pluginID}, rpcCallOpts...)
 	if err != nil {
 		return false, err
 	}
@@ -344,13 +371,24 @@ func (c *Client) FeedSessionWait(ctx context.Context, se *sdkv1.SDKEvent) (bool,
 // 加载/登记插件（随后对同一 plugin_id 调 Register 触发实例化），
 // action="unload" 卸载单个插件（不杀共享 Runtime 进程）。单插件进程返回
 // UNIMPLEMENTED；宿主应只对共享 Runtime 调用。
-func (c *Client) ManagePlugin(ctx context.Context, req *sdkv1.ManagePluginRequest) (*sdkv1.ManagePluginResponse, error) {
+func (c *Client) ManagePlugin(ctx context.Context, req sdk.ManagePluginRequest) (sdk.ManagePluginResponse, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	if req != nil && req.PluginId == "" {
-		req.PluginId = c.pluginID
+	pluginID := req.PluginID
+	if pluginID == "" {
+		pluginID = c.pluginID
 	}
-	return c.svc.ManagePlugin(ctx, req, rpcCallOpts...)
+	resp, err := c.svc.ManagePlugin(ctx, &sdkv1.ManagePluginRequest{
+		Action:     req.Action,
+		PluginId:   pluginID,
+		PluginDir:  req.PluginDir,
+		PluginName: req.PluginName,
+		Version:    req.Version,
+	}, rpcCallOpts...)
+	if err != nil {
+		return sdk.ManagePluginResponse{}, err
+	}
+	return sdk.ManagePluginResponse{OK: resp.GetOk(), Error: resp.GetError()}, nil
 }
 
 // FeedCronJob pushes a cron trigger to the plugin so the handler of a basic
@@ -358,13 +396,24 @@ func (c *Client) ManagePlugin(ctx context.Context, req *sdkv1.ManagePluginReques
 // plugin process. Returns handled=false when the plugin has no matching
 // handler. Old plugin binaries return UNIMPLEMENTED; the caller should treat
 // that as handled=false (job fired without a plugin handler).
-func (c *Client) FeedCronJob(ctx context.Context, req *sdkv1.FeedCronJobRequest) (*sdkv1.FeedCronJobResponse, error) {
+func (c *Client) FeedCronJob(ctx context.Context, req sdk.FeedCronJobRequest) (sdk.FeedCronJobResponse, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	if req != nil && req.PluginId == "" {
-		req.PluginId = c.pluginID
+	pluginID := req.PluginID
+	if pluginID == "" {
+		pluginID = c.pluginID
 	}
-	return c.svc.FeedCronJob(ctx, req, rpcCallOpts...)
+	resp, err := c.svc.FeedCronJob(ctx, &sdkv1.FeedCronJobRequest{
+		JobId:       req.JobID,
+		JobName:     req.JobName,
+		PayloadJson: req.PayloadJSON,
+		RunAt:       req.RunAt,
+		PluginId:    pluginID,
+	}, rpcCallOpts...)
+	if err != nil {
+		return sdk.FeedCronJobResponse{}, err
+	}
+	return sdk.FeedCronJobResponse{Handled: resp.GetHandled()}, nil
 }
 
 // Close releases the underlying gRPC connection and stops the HostService

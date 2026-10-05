@@ -9,8 +9,6 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
-
-	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
 )
 
 // serveFunc starts the gRPC transport. It is registered by the gRPC transport
@@ -162,29 +160,29 @@ func marshalSchema(v map[string]any) []byte {
 }
 
 // Register returns the plugin's metadata and handler descriptors.
-func (s *serviceServer) Register(ctx context.Context, req *sdkv1.RegisterRequest) (*sdkv1.RegisterResponse, error) {
+func (s *serviceServer) Register(_ context.Context, protocolVersion int32) (PluginInfo, error) {
 	// P1 协议协商：Host 上报的 protocol_version 必须与 SDK 一致（P1 删除
 	// legacy event_json/chain_json，版本不匹配无法互操作 → 明确失败并提示
 	// 升级，不做 Legacy 回退）。
-	if req.GetProtocolVersion() != P1ProtocolVersion {
-		return nil, Errorf(CodeFailedPrecondition,
+	if protocolVersion != P1ProtocolVersion {
+		return PluginInfo{}, Errorf(CodeFailedPrecondition,
 			"protocol version mismatch: Host=%d SDK(P1)=%d; please upgrade the SDK or Host to the same protocol version",
-			req.GetProtocolVersion(), P1ProtocolVersion)
+			protocolVersion, P1ProtocolVersion)
 	}
 	if s.impl == nil {
-		return &sdkv1.RegisterResponse{ProtocolVersion: P1ProtocolVersion}, nil
+		return PluginInfo{ProtocolVersion: P1ProtocolVersion}, nil
 	}
 	schema := marshalSchema(s.impl.ConfigSchema)
-	resp := &sdkv1.RegisterResponse{
+	resp := PluginInfo{
 		Name:             s.impl.Name,
 		Version:          s.impl.Version,
 		Description:      s.impl.Description,
 		Author:           s.impl.Author,
-		ConfigSchemaJson: schema,
+		ConfigSchemaJSON: schema,
 		ProtocolVersion:  P1ProtocolVersion,
 	}
 	for _, c := range s.impl.Commands {
-		resp.Commands = append(resp.Commands, &sdkv1.CommandDesc{
+		resp.Commands = append(resp.Commands, CommandDesc{
 			Name:         c.Name,
 			Aliases:      c.Aliases,
 			Description:  c.Description,
@@ -195,72 +193,72 @@ func (s *serviceServer) Register(ctx context.Context, req *sdkv1.RegisterRequest
 		})
 	}
 	for _, f := range s.impl.Filters {
-		resp.Filters = append(resp.Filters, &sdkv1.FilterDesc{Name: f.Name})
+		resp.Filters = append(resp.Filters, FilterDesc{Name: f.Name})
 	}
 	for _, h := range s.impl.Hooks {
-		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: h.Event})
+		resp.Hooks = append(resp.Hooks, HookDesc{Name: h.Name, Event: h.Event})
 	}
 	for _, h := range s.impl.LLMRequestHooks {
-		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: "on_llm_request"})
+		resp.Hooks = append(resp.Hooks, HookDesc{Name: h.Name, Event: "on_llm_request"})
 	}
 	for _, h := range s.impl.ResultHooks {
 		ev := h.Event
 		if ev == "" {
 			ev = "on_decorating_result"
 		}
-		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: ev})
+		resp.Hooks = append(resp.Hooks, HookDesc{Name: h.Name, Event: ev})
 	}
 	for _, h := range s.impl.MessageHooks {
-		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: h.hookEventName()})
+		resp.Hooks = append(resp.Hooks, HookDesc{Name: h.Name, Event: h.hookEventName()})
 	}
 	for _, h := range s.impl.AfterMessageSentHooks {
-		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnAfterMessageSent})
+		resp.Hooks = append(resp.Hooks, HookDesc{Name: h.Name, Event: EventOnAfterMessageSent})
 	}
 	for _, h := range s.impl.WaitingLLMRequestHooks {
-		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnWaitingLLMRequest})
+		resp.Hooks = append(resp.Hooks, HookDesc{Name: h.Name, Event: EventOnWaitingLLMRequest})
 	}
 	for _, h := range s.impl.LLMResponseHooks {
-		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnLLMResponse})
+		resp.Hooks = append(resp.Hooks, HookDesc{Name: h.Name, Event: EventOnLLMResponse})
 	}
 	for _, h := range s.impl.ToolCallHooks {
-		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnUsingLLMTool})
+		resp.Hooks = append(resp.Hooks, HookDesc{Name: h.Name, Event: EventOnUsingLLMTool})
 	}
 	for _, h := range s.impl.ToolRespondHooks {
-		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnLLMToolRespond})
+		resp.Hooks = append(resp.Hooks, HookDesc{Name: h.Name, Event: EventOnLLMToolRespond})
 	}
 	for _, h := range s.impl.PluginErrorHooks {
-		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnPluginError})
+		resp.Hooks = append(resp.Hooks, HookDesc{Name: h.Name, Event: EventOnPluginError})
 	}
 	for _, h := range s.impl.AstrbotLoadedHooks {
-		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnAstrbotLoaded})
+		resp.Hooks = append(resp.Hooks, HookDesc{Name: h.Name, Event: EventOnAstrbotLoaded})
 	}
 	for _, h := range s.impl.PlatformLoadedHooks {
-		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnPlatformLoaded})
+		resp.Hooks = append(resp.Hooks, HookDesc{Name: h.Name, Event: EventOnPlatformLoaded})
 	}
 	for _, h := range s.impl.PluginLoadedHooks {
-		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnPluginLoaded})
+		resp.Hooks = append(resp.Hooks, HookDesc{Name: h.Name, Event: EventOnPluginLoaded})
 	}
 	for _, h := range s.impl.PluginUnloadedHooks {
-		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnPluginUnloaded})
+		resp.Hooks = append(resp.Hooks, HookDesc{Name: h.Name, Event: EventOnPluginUnloaded})
 	}
 	for _, h := range s.impl.AgentBeginHooks {
-		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnAgentBegin})
+		resp.Hooks = append(resp.Hooks, HookDesc{Name: h.Name, Event: EventOnAgentBegin})
 	}
 	for _, h := range s.impl.AgentDoneHooks {
-		resp.Hooks = append(resp.Hooks, &sdkv1.HookDesc{Name: h.Name, Event: EventOnAgentDone})
+		resp.Hooks = append(resp.Hooks, HookDesc{Name: h.Name, Event: EventOnAgentDone})
 	}
 	for _, t := range s.impl.Tools {
-		resp.Tools = append(resp.Tools, &sdkv1.ToolDesc{
-			Name:        t.Name,
-			Description: t.Description,
-			ParamsJson:  marshalSchema(t.ParamsSchema),
+		resp.Tools = append(resp.Tools, ToolDesc{
+			Name:             t.Name,
+			Description:      t.Description,
+			ParamsSchemaJSON: marshalSchema(t.ParamsSchema),
 		})
 	}
 	for _, w := range s.impl.WebAPIs {
-		resp.WebApis = append(resp.WebApis, &sdkv1.WebApiDesc{
-			Route:       w.Route,
-			Methods:     w.Methods,
-			Description: w.Desc,
+		resp.WebAPIs = append(resp.WebAPIs, WebAPIDesc{
+			Route:   w.Route,
+			Methods: w.Methods,
+			Desc:    w.Desc,
 		})
 	}
 	return resp, nil
@@ -272,8 +270,8 @@ func (s *serviceServer) Register(ctx context.Context, req *sdkv1.RegisterRequest
 // `stop` flag and Handled marks "the handler produced a result". New hosts
 // read from `result`; old hosts keep reading the legacy fields, which the
 // call sites below still set.
-func eventResult(handled, stop bool) *sdkv1.EventResult {
-	return &sdkv1.EventResult{
+func eventResult(handled, stop bool) EventResult {
+	return EventResult{
 		Handled:         handled,
 		StopPropagation: stop,
 	}
@@ -289,80 +287,80 @@ func eventResult(handled, stop bool) *sdkv1.EventResult {
 //
 // 命中命令但两个 Handler 均为 nil 时返回显式 Handled=false 的 Result，
 // 供宿主区分"命令不存在"与"存在但未执行"。
-func (s *serviceServer) HandleCommand(_ context.Context, req *sdkv1.HandleCommandRequest) (*sdkv1.HandleCommandResponse, error) {
+func (s *serviceServer) HandleCommand(_ context.Context, name string, args []string, event *Event) (HandleCommandResult, error) {
 	if s.impl == nil {
-		return &sdkv1.HandleCommandResponse{}, nil
+		return HandleCommandResult{}, nil
 	}
-	e, err := eventFromStrict(req.Event)
+	e, err := eventFromStrict(event)
 	if err != nil {
-		return nil, err
+		return HandleCommandResult{}, err
 	}
 	for _, c := range s.impl.Commands {
-		if c.Name != req.Name {
+		if c.Name != name {
 			continue
 		}
-		resp := &sdkv1.HandleCommandResponse{Result: eventResult(true, false)}
+		resp := HandleCommandResult{Result: eventResult(true, false)}
 		if c.ChainHandler != nil {
 			var chain []Component
 			var err error
 			if cerr := safeErr(func() error {
-				chain, err = c.ChainHandler(e, req.Args)
+				chain, err = c.ChainHandler(e, args)
 				return err
 			}); cerr != nil {
-				return nil, cerr
+				return HandleCommandResult{}, cerr
 			}
 			if err != nil {
-				return nil, err
+				return HandleCommandResult{}, err
 			}
-			resp.Chain = componentsToProto(chain)
+			resp.Chain = chain
 			return resp, nil
 		}
 		if c.Handler == nil {
-			return &sdkv1.HandleCommandResponse{Result: eventResult(false, false)}, nil
+			return HandleCommandResult{Result: eventResult(false, false)}, nil
 		}
 		var text string
 		var err error
 		if cerr := safeErr(func() error {
-			text, err = c.Handler(e, req.Args)
+			text, err = c.Handler(e, args)
 			return err
 		}); cerr != nil {
-			return nil, cerr
+			return HandleCommandResult{}, cerr
 		}
 		if err != nil {
-			return nil, err
+			return HandleCommandResult{}, err
 		}
 		resp.Text = text
 		return resp, nil
 	}
-	logService().Warn("HandleCommand: command not found", "name", req.Name)
-	return &sdkv1.HandleCommandResponse{}, nil
+	logService().Warn("HandleCommand: command not found", "name", name)
+	return HandleCommandResult{}, nil
 }
 
 // HandleFilter dispatches to a filter handler by name.
-func (s *serviceServer) HandleFilter(_ context.Context, req *sdkv1.HandleFilterRequest) (*sdkv1.HandleFilterResponse, error) {
+func (s *serviceServer) HandleFilter(_ context.Context, name string, event *Event) (HandleFilterResult, error) {
 	if s.impl == nil {
-		return &sdkv1.HandleFilterResponse{Allow: true}, nil
+		return HandleFilterResult{Allow: true}, nil
 	}
-	e := SDKEventToEvent(req.Event)
+	e := event
 	for _, f := range s.impl.Filters {
-		if f.Name != req.Name {
+		if f.Name != name {
 			continue
 		}
 		if f.Handler == nil {
-			return &sdkv1.HandleFilterResponse{Allow: true}, nil
+			return HandleFilterResult{Allow: true}, nil
 		}
 		var allow bool
 		if err := safeErr(func() error {
 			allow = f.Handler(e)
 			return nil
 		}); err != nil {
-			logService().Error("HandleFilter: handler panic", "name", req.Name, "error", err)
+			logService().Error("HandleFilter: handler panic", "name", name, "error", err)
 			// 安全降级：拒绝继续传播（允许插件拦截事件）。
-			return &sdkv1.HandleFilterResponse{Allow: false, Result: eventResult(true, false)}, nil
+			return HandleFilterResult{Allow: false, Result: eventResult(true, false)}, nil
 		}
-		return &sdkv1.HandleFilterResponse{Allow: allow, Result: eventResult(true, false)}, nil
+		return HandleFilterResult{Allow: allow, Result: eventResult(true, false)}, nil
 	}
-	return &sdkv1.HandleFilterResponse{Allow: true}, nil
+	return HandleFilterResult{Allow: true}, nil
 }
 
 // decodePayload unmarshals a JSON payload into out, tolerating empty input.
@@ -387,29 +385,43 @@ func decodePayload(b []byte, out any) {
 // hookDispatchers 的固定顺序尝试各钩子类别，首个命中的类别完成处理后即返回；
 // 各类钩子的载荷解码/结果写回差异封装在各自的分发器内，markHandled 时机、
 // 日志、错误处理与返回值语义和原实现保持一致。
-func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookRequest) (*sdkv1.HookResponse, error) {
-	resp := &sdkv1.HookResponse{Handled: false}
-	// markHandled flags "a handler produced a result" on both the legacy
-	// `handled` field and the new EventResult sub-message (stop mirrors the
-	// legacy `stop` field). Must be called AFTER resp.Stop is finalized.
-	markHandled := func() {
-		resp.Handled = true
-		resp.Result = eventResult(true, resp.Stop)
-	}
+func (s *serviceServer) HandleHook(_ context.Context, name string, event *Event, chain []Component, payloadJSON []byte) (HandleHookResult, error) {
+	st := &hookState{chain: chain}
+	// markHandled flags "a handler produced a result". Must be called AFTER
+	// st.stop is finalized so the EventResult reads the final stop.
+	markHandled := func() { st.handled = true }
 	if s.impl == nil {
-		return resp, nil
+		return HandleHookResult{}, nil
 	}
-	e := SDKEventToEvent(req.Event)
+	req := &hookRequest{name: name, event: event, payloadJSON: payloadJSON}
 	for _, d := range hookDispatchers {
-		matched, err := d.scan(s, req, e, resp, markHandled)
+		matched, err := d.scan(s, req, event, st, markHandled)
 		if matched {
 			if err != nil {
-				return nil, err
+				return HandleHookResult{}, err
 			}
-			return resp, nil
+			return HandleHookResult{
+				Chain:  st.chain,
+				Result: EventResult{Handled: st.handled, StopPropagation: st.stop},
+			}, nil
 		}
 	}
-	return resp, nil
+	return HandleHookResult{}, nil
+}
+
+// hookRequest is the native hook dispatch input (no protobuf). payloadJSON
+// carries the hook's typed payload as JSON (stdlib only).
+type hookRequest struct {
+	name        string
+	event       *Event
+	payloadJSON []byte
+}
+
+// hookState is the native hook dispatch output accumulator.
+type hookState struct {
+	chain   []Component
+	stop    bool
+	handled bool
 }
 
 // hookDispatcher 是 HandleHook 分发表中的一类钩子（审查项二-11 表驱动重构）。
@@ -422,14 +434,14 @@ func (s *serviceServer) HandleHook(_ context.Context, req *sdkv1.HandleHookReque
 type hookDispatcher struct {
 	// desc 是类别说明，用于注释与测试定位。
 	desc string
-	scan func(s *serviceServer, req *sdkv1.HandleHookRequest, e *Event, resp *sdkv1.HookResponse, markHandled func()) (matched bool, err error)
+	scan func(s *serviceServer, req *hookRequest, e *Event, st *hookState, markHandled func()) (matched bool, err error)
 }
 
 // hookInvoke 封装单个钩子“载荷解码 + 调用 + 结果写回”的差异（审查项二-11）。
-// 仅 result 钩子需要写回（resp.Chain / resp.Stop，须在 markHandled 之前完成，
+// 仅 result 钩子需要写回（st.chain / st.stop，须在 markHandled 之前完成，
 // 这样 EventResult 能读到最终的 Stop）；其余钩子只读 req 并调用自身 Handler。
-// 返回非 nil error 时 HandleHook 以 gRPC 错误返回。
-type hookInvoke[T any] func(req *sdkv1.HandleHookRequest, e *Event, h T, resp *sdkv1.HookResponse) error
+// 返回非 nil error 时 HandleHook 以错误返回。
+type hookInvoke[T any] func(req *hookRequest, e *Event, h T, st *hookState) error
 
 // byName 构造“钩子名严格相等即命中”的通用分发器，沉淀原先各段循环共有的
 // 骨架：按名匹配 → 附加条件（extra，可为 nil，如 result 钩子的事件白名单）→
@@ -444,9 +456,9 @@ func byName[T any](
 ) hookDispatcher {
 	return hookDispatcher{
 		desc: desc,
-		scan: func(s *serviceServer, req *sdkv1.HandleHookRequest, e *Event, resp *sdkv1.HookResponse, markHandled func()) (bool, error) {
+		scan: func(s *serviceServer, req *hookRequest, e *Event, st *hookState, markHandled func()) (bool, error) {
 			for _, h := range hooks(s.impl) {
-				if nameOf(h) != req.Name {
+				if nameOf(h) != req.name {
 					continue
 				}
 				if extra != nil && !extra(h) {
@@ -455,7 +467,7 @@ func byName[T any](
 				if !hasHandler(h) {
 					return true, nil
 				}
-				if err := safeErr(func() error { return invoke(req, e, h, resp) }); err != nil {
+				if err := safeErr(func() error { return invoke(req, e, h, st) }); err != nil {
 					return true, err
 				}
 				markHandled()
@@ -472,7 +484,7 @@ func byName[T any](
 func dispatchEventOnly[H any](desc string, hooks func(*Plugin) []H, nameOf func(H) string, handlerOf func(H) func(*Event) error) hookDispatcher {
 	return byName(desc, hooks, nameOf, nil,
 		func(h H) bool { return handlerOf(h) != nil },
-		func(req *sdkv1.HandleHookRequest, e *Event, h H, resp *sdkv1.HookResponse) error {
+		func(req *hookRequest, e *Event, h H, st *hookState) error {
 			return handlerOf(h)(e)
 		})
 }
@@ -483,9 +495,9 @@ func dispatchEventOnly[H any](desc string, hooks func(*Plugin) []H, nameOf func(
 func dispatchPayload[H, P any](desc string, hooks func(*Plugin) []H, nameOf func(H) string, handlerOf func(H) func(*Event, P) error, newPayload func() P) hookDispatcher {
 	return byName(desc, hooks, nameOf, nil,
 		func(h H) bool { return handlerOf(h) != nil },
-		func(req *sdkv1.HandleHookRequest, e *Event, h H, resp *sdkv1.HookResponse) error {
+		func(req *hookRequest, e *Event, h H, st *hookState) error {
 			pl := newPayload()
-			decodePayload(req.PayloadJson, pl)
+			decodePayload(req.payloadJSON, pl)
 			return handlerOf(h)(e, pl)
 		})
 }
@@ -496,8 +508,8 @@ func dispatchPayload[H, P any](desc string, hooks func(*Plugin) []H, nameOf func
 func dispatchStringPayload[H any](desc string, hooks func(*Plugin) []H, nameOf func(H) string, handlerOf func(H) func(string) error) hookDispatcher {
 	return byName(desc, hooks, nameOf, nil,
 		func(h H) bool { return handlerOf(h) != nil },
-		func(req *sdkv1.HandleHookRequest, e *Event, h H, resp *sdkv1.HookResponse) error {
-			return handlerOf(h)(payloadString(req.PayloadJson))
+		func(req *hookRequest, e *Event, h H, st *hookState) error {
+			return handlerOf(h)(payloadString(req.payloadJSON))
 		})
 }
 
@@ -511,19 +523,18 @@ func resultEventOK(h ResultHook) bool {
 	return ev == EventOnDecoratingResult || ev == EventOnResultHandling
 }
 
-// invokeResultHook 是 result 钩子的调用逻辑：解码入站回复链（解码失败打
-// Warn 后以空链继续，不再静默）、调用装饰 handler、把装饰结果与 Stop 写回
-// resp（markHandled 在其后执行，EventResult 能读到最终 Stop）——错误处理
-// 路径与原 result 段循环逐行对应。审查项二-11。
-func invokeResultHook(req *sdkv1.HandleHookRequest, e *Event, h ResultHook, resp *sdkv1.HookResponse) error {
-	chain := protoToComponents(req.Chain)
+// invokeResultHook 是 result 钩子的调用逻辑：取入站回复链、调用装饰 handler、
+// 把装饰结果与 Stop 写回 st（markHandled 在其后执行，EventResult 能读到最终
+// Stop）。审查项二-11。
+func invokeResultHook(req *hookRequest, e *Event, h ResultHook, st *hookState) error {
+	chain := st.chain
 	var handlerErr error
 	chain, handlerErr = h.Handler(e, chain)
 	if handlerErr != nil {
 		return handlerErr
 	}
-	resp.Chain = componentsToProto(chain)
-	resp.Stop = h.Stop
+	st.chain = chain
+	st.stop = h.Stop
 	return nil
 }
 
@@ -588,7 +599,7 @@ var hookDispatchers = []hookDispatcher{
 		func(h AstrbotLoadedHook) string { return h.Name },
 		nil,
 		func(h AstrbotLoadedHook) bool { return h.Handler != nil },
-		func(req *sdkv1.HandleHookRequest, e *Event, h AstrbotLoadedHook, resp *sdkv1.HookResponse) error {
+		func(req *hookRequest, e *Event, h AstrbotLoadedHook, st *hookState) error {
 			return h.Handler()
 		}),
 
@@ -651,33 +662,39 @@ func payloadString(b []byte) string {
 
 // HandleLLMRequest invokes an on_llm_request hook, letting the plugin modify
 // the LLM system prompt before the provider call.
-func (s *serviceServer) HandleLLMRequest(_ context.Context, req *sdkv1.HandleLLMRequestRequest) (*sdkv1.HandleLLMRequestResponse, error) {
-	resp := &sdkv1.HandleLLMRequestResponse{SystemPrompt: req.SystemPrompt}
+func (s *serviceServer) HandleLLMRequest(_ context.Context, name string, event *Event, systemPrompt, userPrompt string) (HandleLLMRequestResult, error) {
+	// 与旧实现一致：仅回填 SystemPrompt；UserPrompt 仅在 hook 命中且返回非 nil
+	// 时回填（未命中/无 handler 时保持空，宿主据此判定是否修改）。
+	resp := HandleLLMRequestResult{SystemPrompt: systemPrompt}
 	if s.impl == nil {
 		return resp, nil
 	}
-	e := SDKEventToEvent(req.Event)
+	e := event
 	for _, h := range s.impl.LLMRequestHooks {
-		if h.Name != req.Name {
+		if h.Name != name {
 			continue
 		}
 		if h.Handler == nil {
 			return resp, nil
 		}
+		var metadata map[string]any
+		if e != nil {
+			metadata = e.Metadata
+		}
 		pr := &ProviderRequest{
-			SystemPrompt: req.SystemPrompt,
-			UserPrompt:   req.UserPrompt,
-			Extra:        e.Metadata,
+			SystemPrompt: systemPrompt,
+			UserPrompt:   userPrompt,
+			Extra:        metadata,
 		}
 		var handlerErr error
 		if err := safeErr(func() error {
 			pr, handlerErr = h.Handler(e, pr)
 			return handlerErr
 		}); err != nil {
-			return nil, err
+			return HandleLLMRequestResult{}, err
 		}
 		if handlerErr != nil {
-			return nil, handlerErr
+			return HandleLLMRequestResult{}, handlerErr
 		}
 		if pr != nil {
 			resp.SystemPrompt = pr.SystemPrompt
@@ -693,16 +710,16 @@ func (s *serviceServer) HandleLLMRequest(_ context.Context, req *sdkv1.HandleLLM
 // ListTools returns the plugin's current LLM function tools. Plugin tools are
 // registered during instantiation (after Register), so this is pulled live on
 // each call instead of being captured in the Register snapshot.
-func (s *serviceServer) ListTools(context.Context, *sdkv1.PluginRef) (*sdkv1.ListToolsResponse, error) {
-	resp := &sdkv1.ListToolsResponse{}
+func (s *serviceServer) ListTools(context.Context) ([]ToolDesc, error) {
+	var resp []ToolDesc
 	if s.impl == nil {
 		return resp, nil
 	}
 	for _, t := range s.impl.Tools {
-		resp.Tools = append(resp.Tools, &sdkv1.ToolDesc{
-			Name:        t.Name,
-			Description: t.Description,
-			ParamsJson:  marshalSchema(t.ParamsSchema),
+		resp = append(resp, ToolDesc{
+			Name:             t.Name,
+			Description:      t.Description,
+			ParamsSchemaJSON: marshalSchema(t.ParamsSchema),
 		})
 	}
 	return resp, nil
@@ -711,42 +728,36 @@ func (s *serviceServer) ListTools(context.Context, *sdkv1.PluginRef) (*sdkv1.Lis
 // ListWebApis returns the plugin's current Web API routes. Routes may be
 // registered during instantiation (after Register), so this is pulled live on
 // each call instead of being captured in the Register snapshot.
-func (s *serviceServer) ListWebApis(context.Context, *sdkv1.PluginRef) (*sdkv1.ListWebApisResponse, error) {
-	resp := &sdkv1.ListWebApisResponse{}
+func (s *serviceServer) ListWebApis(context.Context) ([]WebAPIDesc, error) {
+	var resp []WebAPIDesc
 	if s.impl == nil {
 		return resp, nil
 	}
 	for _, w := range s.impl.WebAPIs {
-		resp.WebApis = append(resp.WebApis, &sdkv1.WebApiDesc{
-			Route:       w.Route,
-			Methods:     w.Methods,
-			Description: w.Desc,
+		resp = append(resp, WebAPIDesc{
+			Route:   w.Route,
+			Methods: w.Methods,
+			Desc:    w.Desc,
 		})
 	}
 	return resp, nil
 }
 
 // HandleTool invokes a registered LLM function tool.
-func (s *serviceServer) HandleTool(_ context.Context, req *sdkv1.HandleToolRequest) (*sdkv1.HandleToolResponse, error) {
-	resp := &sdkv1.HandleToolResponse{}
+func (s *serviceServer) HandleTool(_ context.Context, name string, args map[string]any, event *Event) (HandleToolResult, error) {
+	resp := HandleToolResult{}
 	if s.impl == nil {
 		return resp, nil
 	}
-	e, err := eventFromStrict(req.Event)
+	e, err := eventFromStrict(event)
 	if err != nil {
-		return nil, err
+		return HandleToolResult{}, err
 	}
-	args := map[string]any{}
-	if len(req.ArgsJson) > 0 {
-		if err := json.Unmarshal(req.ArgsJson, &args); err != nil {
-			resp.Text = "工具参数解析失败: " + err.Error()
-			resp.IsError = true
-			resp.Result = eventResult(true, false)
-			return resp, nil
-		}
+	if args == nil {
+		args = map[string]any{}
 	}
 	for _, t := range s.impl.Tools {
-		if t.Name != req.Name {
+		if t.Name != name {
 			continue
 		}
 		if t.Handler == nil {
@@ -773,14 +784,14 @@ func (s *serviceServer) HandleTool(_ context.Context, req *sdkv1.HandleToolReque
 		resp.Result = eventResult(true, false)
 		return resp, nil
 	}
-	resp.Text = "工具 " + req.Name + " 未找到"
+	resp.Text = "工具 " + name + " 未找到"
 	resp.IsError = true
 	return resp, nil
 }
 
 // HealthCheck reports the plugin's liveness.
-func (s *serviceServer) HealthCheck(context.Context, *sdkv1.Empty) (*sdkv1.HealthResponse, error) {
-	resp := &sdkv1.HealthResponse{Ok: true}
+func (s *serviceServer) HealthCheck(context.Context) (HealthInfo, error) {
+	resp := HealthInfo{OK: true}
 	if s.impl != nil {
 		resp.Version = s.impl.Version
 	}
@@ -789,8 +800,8 @@ func (s *serviceServer) HealthCheck(context.Context, *sdkv1.Empty) (*sdkv1.Healt
 
 // SetLogLevel adjusts the plugin's logger level at runtime. "" or an unknown
 // name falls back to Info; CRITICAL maps to Error.
-func (s *serviceServer) SetLogLevel(_ context.Context, req *sdkv1.SetLogLevelRequest) (*sdkv1.Empty, error) {
-	name := strings.ToUpper(strings.TrimSpace(req.Level))
+func (s *serviceServer) SetLogLevel(_ context.Context, level string) error {
+	name := strings.ToUpper(strings.TrimSpace(level))
 	if name == "CRITICAL" {
 		name = "ERROR"
 	}
@@ -799,32 +810,32 @@ func (s *serviceServer) SetLogLevel(_ context.Context, req *sdkv1.SetLogLevelReq
 		l.SetLevelName(name)
 	}
 	logMu.Unlock()
-	return &sdkv1.Empty{}, nil
+	return nil
 }
 
 // GetConfigSchema returns the plugin's CURRENT config schema (JSON). The host
 // pulls it live (e.g. update_manager refreshes runtime schema) and falls back
 // to the Register snapshot when this is empty/unimplemented.
-func (s *serviceServer) GetConfigSchema(context.Context, *sdkv1.PluginRef) (*sdkv1.GetConfigSchemaResponse, error) {
+func (s *serviceServer) GetConfigSchema(context.Context) ([]byte, error) {
 	var schema []byte
 	if s.impl != nil {
 		schema = marshalSchema(s.impl.ConfigSchema)
 	}
-	return &sdkv1.GetConfigSchemaResponse{SchemaJson: schema}, nil
+	return schema, nil
 }
 
 // FeedSessionWait pushes an inbound message event into the plugin so a
 // registered session wait (SessionWait) for the event's unified message origin
 // can consume it. Returns handled=true when a wait matched and consumed the
 // event; otherwise false.
-func (s *serviceServer) FeedSessionWait(_ context.Context, req *sdkv1.FeedSessionWaitRequest) (*sdkv1.FeedSessionWaitResponse, error) {
+func (s *serviceServer) FeedSessionWait(_ context.Context, event *Event) (FeedSessionWaitResult, error) {
 	if s.impl == nil {
-		return &sdkv1.FeedSessionWaitResponse{Handled: false}, nil
+		return FeedSessionWaitResult{Handled: false}, nil
 	}
-	e := SDKEventToEvent(req.Event)
+	e := event
 	umo := s.impl.unifiedMsgOriginOf(e)
 	if umo == "" {
-		return &sdkv1.FeedSessionWaitResponse{Handled: false}, nil
+		return FeedSessionWaitResult{Handled: false}, nil
 	}
 	// take 之后再按结果处理，避免"先删后调"：panic 终止等待并注销宿主侧
 	// 登记；handled=true 消费掉并注销宿主侧登记；handled=false 放回等待
@@ -837,17 +848,17 @@ func (s *serviceServer) FeedSessionWait(_ context.Context, req *sdkv1.FeedSessio
 		}); err != nil {
 			logService().Error("FeedSessionWait: wait handler panic", "umo", umo, "error", err)
 			s.notifyHostWaitConsumed(w)
-			return &sdkv1.FeedSessionWaitResponse{Handled: false}, nil
+			return FeedSessionWaitResult{Handled: false}, nil
 		}
 		if handled {
 			s.notifyHostWaitConsumed(w)
-			return &sdkv1.FeedSessionWaitResponse{Handled: true}, nil
+			return FeedSessionWaitResult{Handled: true}, nil
 		}
 		// 未消费：重新放回，等待下一条匹配事件。
 		s.impl.putSessionWait(w)
-		return &sdkv1.FeedSessionWaitResponse{Handled: false}, nil
+		return FeedSessionWaitResult{Handled: false}, nil
 	}
-	return &sdkv1.FeedSessionWaitResponse{Handled: false}, nil
+	return FeedSessionWaitResult{Handled: false}, nil
 }
 
 // notifyHostWaitConsumed 尽力注销宿主侧登记的会话等待（panic/已消费时
@@ -862,9 +873,7 @@ func (s *serviceServer) notifyHostWaitConsumed(w *SessionWait) {
 	}
 	ctx, cancel := hostRPCCtx()
 	defer cancel()
-	if _, rerr := svc.UnregisterSessionWait(ctx, &sdkv1.UnregisterSessionWaitRequest{WaitId: w.WaitID}); rerr != nil {
-		logService().Warn("notifyHostWaitConsumed: 注销宿主等待失败", "umo", w.UMO, "err", rerr)
-	}
+	svc.UnregisterSessionWait(ctx, w.WaitID)
 }
 
 // webRoute 是 webRoutePattern 的缓存结果（正则 + 动态段名）。
@@ -940,8 +949,8 @@ func webRoutePattern(route string) (*regexp.Regexp, []string, error) {
 
 // HandleWebRequest dispatches a proxied dashboard HTTP request to a
 // plugin-registered Web API (WebAPIs). Returns 404 when no route matches.
-func (s *serviceServer) HandleWebRequest(_ context.Context, req *sdkv1.HandleWebRequestRequest) (*sdkv1.HandleWebRequestResponse, error) {
-	resp := &sdkv1.HandleWebRequestResponse{StatusCode: 404}
+func (s *serviceServer) HandleWebRequest(_ context.Context, req HandleWebRequest) (HandleWebResponse, error) {
+	resp := HandleWebResponse{StatusCode: 404}
 	if s.impl == nil {
 		return resp, nil
 	}
@@ -974,13 +983,13 @@ func (s *serviceServer) HandleWebRequest(_ context.Context, req *sdkv1.HandleWeb
 		if sm == nil {
 			continue
 		}
-		query := map[string][]string{}
-		for _, kv := range req.Query {
-			query[kv.Key] = append(query[kv.Key], kv.Value)
+		query := req.Query
+		if query == nil {
+			query = map[string][]string{}
 		}
-		headers := map[string][]string{}
-		for _, kv := range req.Headers {
-			headers[kv.Key] = append(headers[kv.Key], kv.Value)
+		headers := req.Headers
+		if headers == nil {
+			headers = map[string][]string{}
 		}
 		pathParams := map[string]string{}
 		for i, n := range names {
@@ -1005,7 +1014,7 @@ func (s *serviceServer) HandleWebRequest(_ context.Context, req *sdkv1.HandleWeb
 			// 错误原文（panic 时含完整堆栈）只进日志，不回显给 HTTP 客户端。
 			logService().Error("WebAPI handler failed", "route", w.Route, "error", handlerErr)
 			errBody, _ := json.Marshal(map[string]string{"status": "error", "message": "internal error"})
-			return &sdkv1.HandleWebRequestResponse{
+			return HandleWebResponse{
 				StatusCode: 500,
 				Body:       errBody,
 			}, nil
@@ -1014,39 +1023,23 @@ func (s *serviceServer) HandleWebRequest(_ context.Context, req *sdkv1.HandleWeb
 		if status < 100 || status > 599 {
 			status = 200
 		}
-		out := &sdkv1.HandleWebRequestResponse{StatusCode: int32(status), Body: body}
-		for k, v := range respHeaders {
-			out.Headers = append(out.Headers, &sdkv1.WebKV{Key: k, Value: v})
-		}
-		return out, nil
+		return HandleWebResponse{StatusCode: status, Headers: respHeaders, Body: body}, nil
 	}
 	return resp, nil
 }
 
 // Cleanup invokes the plugin's OnUnload hook.
-func (s *serviceServer) Cleanup(context.Context, *sdkv1.PluginRef) (*sdkv1.Empty, error) {
+func (s *serviceServer) Cleanup(context.Context) error {
 	if s.impl != nil && s.impl.OnUnload != nil {
-		return &sdkv1.Empty{}, s.impl.OnUnload()
+		return s.impl.OnUnload()
 	}
-	return &sdkv1.Empty{}, nil
+	return nil
 }
 
-// eventFromStrict 从 proto SDKEvent 还原 Event；nil（协议不匹配/缺事件）直接报错。
-func eventFromStrict(se *sdkv1.SDKEvent) (*Event, error) {
-	if se == nil {
+// eventFromStrict 校验事件非 nil；nil（协议不匹配/缺事件）直接报错。
+func eventFromStrict(e *Event) (*Event, error) {
+	if e == nil {
 		return nil, Error(CodeInvalidArgument, "event is required (SDKEvent)")
 	}
-	return SDKEventToEvent(se), nil
-}
-
-// FeedCronJob / ManagePlugin are Python-shared-runtime features; a Go plugin
-// (single- or Native-process) does not implement them. They return
-// CodeUnimplemented, which the gRPC transport maps to gRPC UNIMPLEMENTED (the
-// behaviour the generated UnimplementedPluginServiceServer previously gave).
-func (s *serviceServer) FeedCronJob(context.Context, *sdkv1.FeedCronJobRequest) (*sdkv1.FeedCronJobResponse, error) {
-	return nil, Error(CodeUnimplemented, "FeedCronJob is not implemented by the Go plugin SDK")
-}
-
-func (s *serviceServer) ManagePlugin(context.Context, *sdkv1.ManagePluginRequest) (*sdkv1.ManagePluginResponse, error) {
-	return nil, Error(CodeUnimplemented, "ManagePlugin is not implemented by the Go plugin SDK")
+	return e, nil
 }

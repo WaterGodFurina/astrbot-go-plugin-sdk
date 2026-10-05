@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-
-	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
 )
 
 // Command is a message command a plugin accepts. The plugin author only has
@@ -251,14 +249,9 @@ func (p *Plugin) RegisterSessionWait(umo string, timeoutSec int, handler func(e 
 	} else {
 		ctx, cancel := hostRPCCtx()
 		defer cancel()
-		if resp, rerr := svc.RegisterSessionWait(ctx, &sdkv1.RegisterSessionWaitRequest{
-			Umo:            umo,
-			TimeoutSeconds: int32(timeoutSec),
-		}); rerr != nil {
-			logService().Warn("RegisterSessionWait 上报宿主失败", "umo", umo, "err", rerr)
-		} else if resp != nil {
+		if waitID := svc.RegisterSessionWait(ctx, p.Name, umo, int32(timeoutSec)); waitID != "" {
 			p.sessionWaitsMu.Lock()
-			w.WaitID = resp.GetWaitId()
+			w.WaitID = waitID
 			p.sessionWaitsMu.Unlock()
 		}
 	}
@@ -279,9 +272,7 @@ func (p *Plugin) UnregisterSessionWait(umo string) {
 	if svc, err := hostServiceCaller(); err == nil {
 		ctx, cancel := hostRPCCtx()
 		defer cancel()
-		if _, rerr := svc.UnregisterSessionWait(ctx, &sdkv1.UnregisterSessionWaitRequest{WaitId: waitID}); rerr != nil {
-			logService().Warn("UnregisterSessionWait 上报宿主失败", "umo", umo, "err", rerr)
-		}
+		svc.UnregisterSessionWait(ctx, waitID)
 	}
 }
 

@@ -1,4 +1,4 @@
-module github.com/WaterGodFurina/Astrbot-go-plugin-sdk
+module github.com/WaterGodFurina/Astrbot-go-plugin-sdk/v2
 
 go 1.23
 

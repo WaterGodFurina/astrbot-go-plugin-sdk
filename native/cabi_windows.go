@@ -3,8 +3,9 @@
 // Windows Native transport: the plugin is built as a c-shared DLL and the host
 // calls it through a minimal C ABI (LoadLibrary + GetProcAddress). Go's stdlib
 // `plugin` is unsupported on Windows, and c-shared cannot carry Go interface
-// values across the boundary, so request/response cross as sdkv1 protobuf
-// bytes. No loopback gRPC, no JSON, no second protocol is introduced.
+// values across the boundary, so request/response cross as `encoding/json`
+// bytes (see cabi_wire.go / cabi_dispatch_windows.go). No protobuf, no loopback
+// gRPC.
 //
 // The C surface is intentionally tiny (4 symbols):
 //
@@ -28,8 +29,7 @@ import (
 	"sync"
 	"unsafe"
 
-	sdk "github.com/WaterGodFurina/Astrbot-go-plugin-sdk"
-	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
+	sdk "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/v2"
 )
 
 // cabiPlugin 是宿主可见的插件句柄背后的状态。
@@ -95,8 +95,8 @@ func AstrBotPluginCall(handle C.uintptr_t, method *C.char, reqPtr *C.uint8_t, re
 	}
 	resp, err := cabiCall(cp.svc, m, req)
 	if err != nil {
-		// 错误路径：返回码 3，缓冲为错误文本（非 protobuf），宿主据返回码
-		// 区分。主路径（返回码 0）始终是 sdkv1 protobuf bytes。
+		// 错误路径：返回码 3，缓冲为错误文本，宿主据返回码区分。
+		// 主路径（返回码 0）是 JSON 编码的原生结果。
 		msg := []byte(err.Error())
 		if len(msg) > 0 {
 			cb := C.CBytes(msg)
@@ -134,5 +134,5 @@ func AstrBotPluginClose(handle C.uintptr_t) {
 		return
 	}
 	cp.stopped = true
-	_, _ = cp.svc.Cleanup(context.Background(), &sdkv1.PluginRef{})
+	_ = cp.svc.Cleanup(context.Background())
 }

@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"testing"
-
-	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
 )
 
 // TestHostServiceIdentityIsolation 验证 HostService 反向调用的身份隔离：
@@ -14,18 +12,18 @@ func TestHostServiceIdentityIsolation(t *testing.T) {
 	srv := &HostServiceServer{pluginID: "test_plugin_a"}
 
 	// 跨插件读取被拒
-	_, err := srv.GetConfig(context.Background(), &sdkv1.GetConfigRequest{PluginName: "test_plugin_b"})
+	_, err := srv.GetConfig(context.Background(), "test_plugin_b")
 	if CodeOf(err) != CodePermissionDenied {
 		t.Fatalf("cross-plugin GetConfig: want PermissionDenied, got %v", err)
 	}
 
 	// 自己名字放行（hooks 未设置 → 返回空配置而非错误）
-	if _, err = srv.GetConfig(context.Background(), &sdkv1.GetConfigRequest{PluginName: "test_plugin_a"}); err != nil {
+	if _, err = srv.GetConfig(context.Background(), "test_plugin_a"); err != nil {
 		t.Fatalf("self GetConfig should pass, got %v", err)
 	}
 
 	// 跨插件写入被拒
-	_, err = srv.SetConfig(context.Background(), &sdkv1.SetConfigRequest{PluginName: "test_plugin_b"})
+	err = srv.SetConfig(context.Background(), "test_plugin_b", nil)
 	if CodeOf(err) != CodePermissionDenied {
 		t.Fatalf("cross-plugin SetConfig: want PermissionDenied, got %v", err)
 	}
@@ -34,11 +32,11 @@ func TestHostServiceIdentityIsolation(t *testing.T) {
 	// 用一个独立身份避免污染其他测试
 	lim := &HostServiceServer{pluginID: "test_limiter"}
 	for i := 0; i < maxChatLLMPerMinute; i++ {
-		if _, err := lim.ChatLLM(context.Background(), &sdkv1.ChatLLMRequest{}); err != nil {
+		if _, err := lim.ChatLLM(context.Background(), &ChatLLMRequest{}); err != nil {
 			t.Fatalf("call %d should pass, got %v", i+1, err)
 		}
 	}
-	_, err = lim.ChatLLM(context.Background(), &sdkv1.ChatLLMRequest{})
+	_, err = lim.ChatLLM(context.Background(), &ChatLLMRequest{})
 	if CodeOf(err) != CodeResourceExhausted {
 		t.Fatalf("over-limit ChatLLM: want ResourceExhausted, got %v", err)
 	}
@@ -54,11 +52,11 @@ func TestBindHostServiceName(t *testing.T) {
 	BindHostServiceName("astrbot_plugin_jm_cosmos", "jm_cosmos")
 
 	// 插件用注册名 jm_cosmos 访问自己 → 放行
-	if _, err := server.GetConfig(context.Background(), &sdkv1.GetConfigRequest{PluginName: "jm_cosmos"}); err != nil {
+	if _, err := server.GetConfig(context.Background(), "jm_cosmos"); err != nil {
 		t.Fatalf("self access with registered name should pass, got %v", err)
 	}
 	// 其他插件名仍被拒
-	_, err := server.GetConfig(context.Background(), &sdkv1.GetConfigRequest{PluginName: "other"})
+	_, err := server.GetConfig(context.Background(), "other")
 	if CodeOf(err) != CodePermissionDenied {
 		t.Fatalf("cross-plugin after bind: want PermissionDenied, got %v", err)
 	}
@@ -72,67 +70,45 @@ func TestBindHostServiceName(t *testing.T) {
 // 桥接钩子被拒。
 func TestRegisterBridgeHookAnonymousRejected(t *testing.T) {
 	srv := &HostServiceServer{pluginID: ""}
-	_, err := srv.RegisterBridgeHook(context.Background(), &sdkv1.BridgeHookRequest{HookName: "hook"})
+	err := srv.RegisterBridgeHook(context.Background(), "", "hook")
 	if CodeOf(err) != CodeFailedPrecondition {
 		t.Fatalf("anonymous RegisterBridgeHook: want FailedPrecondition, got %v", err)
 	}
 }
 
-// TestSendMessageComponentsPayload 验证 P0-2：SendMessage 原生组件链
-// （chain_components）里的 BinaryPayload：
-//   - inline_data → hook 收到 Base64（等于 inline 的 base64）
-//   - FileReference → 经 host ReadBlob hook 分块读回 → Base64
-// 并确保 chain_components 为空时回退 chain_json 旧路径。
+// TestSendMessageComponentsPayload 验证原生 SendMessage 把组件链原样交给宿主
+// hook（含 Base64 媒体二进制）。
+//
+// 注：旧实现里 proto SendMessageRequest.ChainComponents 的 BinaryPayload
+// （inline_data / file→ReadBlob）解码发生在核心 HostServiceServer；native
+// 重构后核心只接收 []Component，proto→native 的组件解码（含 inline_data）
+// 移至 transport/grpc 边界，file 型 payload 的 blob 解析由宿主 hook 侧负责。
 func TestSendMessageComponentsPayload(t *testing.T) {
-	// 内存 mock blob：8B 块分块读，验证 FileReference 分块读回。
-	fileData := []byte("0123456789abcdef") // 16B → 分 2 块读
-	blobData := fileData
+	fileData := []byte("0123456789abcdef")
+	wantB64 := base64.StdEncoding.EncodeToString(fileData)
 	var got []Component
 	SetHostHooks(HostServiceHooks{
 		SendMessage: func(platform, sessionID string, chain []Component) error {
 			got = chain
 			return nil
 		},
-		ReadBlob: func(handleID string, offset int64, limit int32) ([]byte, bool, int64, error) {
-			chunk := int64(8)
-			if limit > 0 {
-				chunk = int64(limit)
-			}
-			if offset >= int64(len(blobData)) {
-				return nil, true, int64(len(blobData)), nil
-			}
-			end := offset + chunk
-			if end > int64(len(blobData)) {
-				end = int64(len(blobData))
-			}
-			return blobData[offset:end], end >= int64(len(blobData)), int64(len(blobData)), nil
-		},
 	})
 
-	ref := sdkv1.FileReference{HandleId: "abcdef0123456789abcdef0123456789", Size: int64(len(fileData))}
-
-	req := &sdkv1.SendMessageRequest{
-		Platform:  "aiocqhttp",
-		SessionId: "g:1",
-		ChainComponents: []*sdkv1.Component{
-			{Type: "Plain", Text: "hi"},
-			{Type: "Image", Payload: &sdkv1.BinaryPayload{
-				Payload: &sdkv1.BinaryPayload_File{File: &ref},
-			}},
-		},
+	chain := []Component{
+		{Type: CompPlain, Text: "hi"},
+		{Type: CompImage, Base64: wantB64},
 	}
 	srv := &HostServiceServer{pluginID: "p"}
-	if _, err := srv.SendMessage(context.Background(), req); err != nil {
+	if err := srv.SendMessage(context.Background(), "aiocqhttp", "g:1", chain); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	if len(got) != 2 {
 		t.Fatalf("expected 2 components, got %d", len(got))
 	}
-	if got[0].Type != "Plain" || got[0].Text != "hi" {
+	if got[0].Type != CompPlain || got[0].Text != "hi" {
 		t.Fatalf("plain comp mismatch: %#v", got[0])
 	}
-	wantB64 := base64.StdEncoding.EncodeToString(fileData)
-	if got[1].Type != "Image" || got[1].Base64 != wantB64 {
-		t.Fatalf("file payload image mismatch: %#v (want b64=%s)", got[1], wantB64)
+	if got[1].Type != CompImage || got[1].Base64 != wantB64 {
+		t.Fatalf("image comp mismatch: %#v (want b64=%s)", got[1], wantB64)
 	}
 }

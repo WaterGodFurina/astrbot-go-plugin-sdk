@@ -2,18 +2,15 @@ package sdk
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
-
-	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
 )
 
 // TestSkillsHistoryRoundTrip 验证 skills + platform-message-history RPC 的
-// 往返：宿主侧 SetHostHooks mock 提供数据 → HostServiceServer 处理 proto
-// 请求 → 强类型解码（SkillInfo / PMHistoryRecord 字段与宿主/Python SDK 对齐）。
+// 往返：宿主侧 SetHostHooks mock 提供数据 → native HostService 处理请求 →
+// 强类型解码（SkillInfo / PMHistoryRecord 字段与宿主/Python SDK 对齐）。
 //
 // 不直接调用 Host.* 客户端方法（它们需要 go-plugin broker 的联网通道）；
-// 这里验证 server RPC + 解码路径，Host.* 的 broker 握手在 CI 的插件级测试覆盖。
+// 这里验证 server 端 + 解码路径，Host.* 的 broker 握手在 CI 的插件级测试覆盖。
 func TestSkillsHistoryRoundTrip(t *testing.T) {
 	SetHostHooks(HostServiceHooks{
 		ListSkills: func() []map[string]any {
@@ -89,20 +86,13 @@ func TestSkillsHistoryRoundTrip(t *testing.T) {
 
 	srv := &HostServiceServer{pluginID: "test_plugin_skills"}
 
-	// ListSkills RPC → 强类型解码
-	resp, err := srv.ListSkills(context.Background(), &sdkv1.Empty{})
-	if err != nil {
-		t.Fatalf("ListSkills RPC: %v", err)
-	}
-	if len(resp.SkillsJson) != 1 {
-		t.Fatalf("ListSkills: want 1 skill, got %d", len(resp.SkillsJson))
-	}
-	var m map[string]any
-	if err := json.Unmarshal(resp.SkillsJson[0], &m); err != nil {
-		t.Fatalf("skills_json unmarshal: %v", err)
+	// ListSkills → 强类型解码
+	skills := srv.ListSkills(context.Background())
+	if len(skills) != 1 {
+		t.Fatalf("ListSkills: want 1 skill, got %d", len(skills))
 	}
 	var s SkillInfo
-	s.FromMap(m)
+	s.FromMap(skills[0])
 	if s.Name != "weather" || !s.Active || s.Description != "查询天气" {
 		t.Fatalf("SkillInfo decode mismatch: %+v", s)
 	}
@@ -110,32 +100,21 @@ func TestSkillsHistoryRoundTrip(t *testing.T) {
 		t.Fatalf("SkillInfo.SourceType: want local_only, got %q", s.SourceType)
 	}
 
-	// SetSkillActive / DeleteSkill RPC（hooks mock 断言内部调用成功）
-	if _, err := srv.SetSkillActive(context.Background(), &sdkv1.SetSkillActiveRequest{Name: "weather", Active: true}); err != nil {
-		t.Fatalf("SetSkillActive RPC: %v", err)
+	// SetSkillActive / DeleteSkill（hooks mock 断言内部调用成功）
+	if err := srv.SetSkillActive(context.Background(), "weather", true); err != nil {
+		t.Fatalf("SetSkillActive: %v", err)
 	}
-	if _, err := srv.DeleteSkill(context.Background(), &sdkv1.DeleteSkillRequest{Name: "obsolete"}); err != nil {
-		t.Fatalf("DeleteSkill RPC: %v", err)
+	if err := srv.DeleteSkill(context.Background(), "obsolete"); err != nil {
+		t.Fatalf("DeleteSkill: %v", err)
 	}
 
-	// GetPlatformMessageHistory RPC → 强类型解码
-	gmh, err := srv.GetPlatformMessageHistory(context.Background(), &sdkv1.GetPMHistoryRequest{
-		PlatformId: "aiocqhttp",
-		UserId:     "g:1",
-		Limit:      50,
-	})
-	if err != nil {
-		t.Fatalf("GetPMHistory RPC: %v", err)
-	}
-	if len(gmh.RecordsJson) != 1 {
-		t.Fatalf("GetPMHistory: want 1 record, got %d", len(gmh.RecordsJson))
-	}
-	var rm map[string]any
-	if err := json.Unmarshal(gmh.RecordsJson[0], &rm); err != nil {
-		t.Fatalf("records_json unmarshal: %v", err)
+	// GetPlatformMessageHistory → 强类型解码
+	records := srv.GetPlatformMessageHistory(context.Background(), "aiocqhttp", "g:1", 50)
+	if len(records) != 1 {
+		t.Fatalf("GetPMHistory: want 1 record, got %d", len(records))
 	}
 	var r PMHistoryRecord
-	r.FromMap(rm)
+	r.FromMap(records[0])
 	if r.ID != 7 || r.SenderID != "u1" {
 		t.Fatalf("PMHistory decode mismatch: %+v", r)
 	}
@@ -147,46 +126,24 @@ func TestSkillsHistoryRoundTrip(t *testing.T) {
 		t.Fatalf("PMHistory.Content type: want user, got %v", content["type"])
 	}
 
-	// Insert RPC → 强类型解码
-	insJSON, err := json.Marshal(map[string]any{"type": "user", "message": []any{"hello"}})
-	if err != nil {
-		t.Fatalf("marshal insert content: %v", err)
-	}
-	ins, err := srv.InsertPlatformMessageHistory(context.Background(), &sdkv1.InsertPMHistoryRequest{
-		PlatformId:       "aiocqhttp",
-		UserId:           "g:1",
-		SenderId:         "u2",
-		ContentJson:      insJSON,
-		LlmCheckpointId:  "ck-1",
-		MaxMessages:      200,
-	})
-	if err != nil {
-		t.Fatalf("InsertPMHistory RPC: %v", err)
-	}
-	if len(ins.RecordJson) == 0 {
-		t.Fatalf("InsertPMHistory: empty record_json")
-	}
-	var rim map[string]any
-	if err := json.Unmarshal(ins.RecordJson, &rim); err != nil {
-		t.Fatalf("insert record unmarshal: %v", err)
+	// Insert → 强类型解码（native content 直接传 any，无需 JSON 编解码）
+	ins := srv.InsertPlatformMessageHistory(context.Background(), "aiocqhttp", "g:1", "u2",
+		map[string]any{"type": "user", "message": []any{"hello"}}, "ck-1", 200)
+	if ins == nil {
+		t.Fatalf("InsertPMHistory: nil record")
 	}
 	var ir PMHistoryRecord
-	ir.FromMap(rim)
+	ir.FromMap(ins)
 	if ir.ID != 99 || ir.PlatformID != "aiocqhttp" {
 		t.Fatalf("Insert PMHistory mismatch: %+v", ir)
 	}
 
-	// Update / Delete RPC
-	upJSON, _ := json.Marshal(map[string]any{"x": 1})
-	if _, err := srv.UpdatePlatformMessageHistory(context.Background(), &sdkv1.UpdatePMHistoryRequest{
-		Id:              7,
-		ContentJson:     upJSON,
-		LlmCheckpointId: "ck-2",
-	}); err != nil {
-		t.Fatalf("UpdatePMHistory RPC: %v", err)
+	// Update / Delete
+	if err := srv.UpdatePlatformMessageHistory(context.Background(), 7, map[string]any{"x": 1}, "ck-2"); err != nil {
+		t.Fatalf("UpdatePMHistory: %v", err)
 	}
-	if _, err := srv.DeletePlatformMessageHistory(context.Background(), &sdkv1.DeletePMHistoryRequest{Id: 7}); err != nil {
-		t.Fatalf("DeletePMHistory RPC: %v", err)
+	if err := srv.DeletePlatformMessageHistory(context.Background(), 7); err != nil {
+		t.Fatalf("DeletePMHistory: %v", err)
 	}
 }
 
@@ -194,11 +151,11 @@ func TestSkillsHistoryRoundTrip(t *testing.T) {
 func TestSkillInfoFromMapFallback(t *testing.T) {
 	var s SkillInfo
 	s.FromMap(map[string]any{
-		"name":        "a",
-		"active":      true,      // bool
-		"readonly":    "notbool", // 非 bool → false
-		"source_type": nil,       // 缺失 → local_only
-		"source_label": "custom", // 非空自定义 → 保留
+		"name":         "a",
+		"active":       true,      // bool
+		"readonly":     "notbool", // 非 bool → false
+		"source_type":  nil,       // 缺失 → local_only
+		"source_label": "custom",  // 非空自定义 → 保留
 	})
 	if s.Name != "a" || !s.Active || s.Readonly {
 		t.Fatalf("SkillInfo.FromMap fallback mismatch: %+v", s)
@@ -209,7 +166,7 @@ func TestSkillInfoFromMapFallback(t *testing.T) {
 }
 
 // TestPMHistoryFromMapInt64 验证 PMHistoryRecord.FromMap 的 id 转换
-//（宿主 JSON 里数字为 float64，int64 也要兼容）。
+// （宿主 JSON 里数字为 float64，int64 也要兼容）。
 func TestPMHistoryFromMapInt64(t *testing.T) {
 	var r PMHistoryRecord
 	r.FromMap(map[string]any{

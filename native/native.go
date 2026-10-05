@@ -3,6 +3,10 @@
 // plugin.Open / LoadDLL and calls the exported entry to obtain a PluginService,
 // which NativeClient invokes directly. Reverse calls run against an in-process
 // host service, also without RPC.
+//
+// The Native transport passes native Go values straight across the boundary —
+// no protobuf, no serialization. (The Windows C-ABI bridge in cabi_*.go uses
+// encoding/json only because a C ABI cannot carry Go values.)
 package native
 
 import (
@@ -11,8 +15,7 @@ import (
 	"sync"
 	"time"
 
-	sdk "github.com/WaterGodFurina/Astrbot-go-plugin-sdk"
-	sdkv1 "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/gen/sdkv1"
+	sdk "github.com/WaterGodFurina/Astrbot-go-plugin-sdk/v2"
 )
 
 // Plugin is the value returned by the injected Native entry to the host: the
@@ -33,23 +36,9 @@ func Serve(p *sdk.Plugin, pluginID string) (Plugin, error) {
 	return Plugin{Service: svc, Host: hs}, nil
 }
 
-// maxMsgSize is kept for symmetry with the gRPC transport; in-process calls
-// need no message cap.
+// defaultRPCTimeout bounds a Native call the same way the gRPC transport does;
+// in-process calls need no message cap.
 const defaultRPCTimeout = 30 * time.Second
-
-func withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
-	if _, ok := ctx.Deadline(); ok {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, defaultRPCTimeout)
-}
-
-func normalizeResult(r *sdkv1.EventResult, legacySent, legacyStop, legacyHandled bool) *sdkv1.EventResult {
-	if r != nil {
-		return r
-	}
-	return &sdkv1.EventResult{Handled: legacyHandled, Sent: legacySent, StopPropagation: legacyStop}
-}
 
 // NativeClient is the host-side client for an in-process Native plugin. It
 // implements sdk.PluginClient, so host call sites are transport-agnostic.
@@ -86,169 +75,104 @@ func (c *NativeClient) PluginID() string                  { return c.id }
 func (c *NativeClient) ForPlugin(string) sdk.PluginClient { return c }
 func (c *NativeClient) Close() error                      { return nil }
 
-func (c *NativeClient) Register(ctx context.Context) (*sdkv1.RegisterResponse, error) {
+func (c *NativeClient) Register(ctx context.Context) (sdk.PluginInfo, error) {
 	defer c.enter()()
-	resp, err := c.svc.Register(ctx, &sdkv1.RegisterRequest{ProtocolVersion: sdk.P1ProtocolVersion, PluginId: c.id})
-	if err != nil {
-		return nil, err
-	}
-	return resp, nil
+	return c.svc.Register(ctx, sdk.P1ProtocolVersion)
 }
 
-func (c *NativeClient) HandleCommand(ctx context.Context, name string, args []string, se *sdkv1.SDKEvent) (string, []sdk.Component, *sdkv1.EventResult, error) {
+func (c *NativeClient) HandleCommand(ctx context.Context, name string, args []string, event *sdk.Event) (sdk.HandleCommandResult, error) {
 	defer c.enter()()
-	resp, err := c.svc.HandleCommand(ctx, &sdkv1.HandleCommandRequest{Name: name, Args: args, Event: se, PluginId: c.id})
-	if err != nil {
-		return "", nil, &sdkv1.EventResult{}, err
-	}
-	return resp.Text, sdk.ProtoToComponents(resp.Chain), normalizeResult(resp.Result, resp.Sent, resp.Stop, false), nil
+	return c.svc.HandleCommand(ctx, name, args, event)
 }
 
-func (c *NativeClient) HandleFilter(ctx context.Context, name string, se *sdkv1.SDKEvent) (bool, *sdkv1.EventResult, error) {
+func (c *NativeClient) HandleFilter(ctx context.Context, name string, event *sdk.Event) (sdk.HandleFilterResult, error) {
 	defer c.enter()()
-	resp, err := c.svc.HandleFilter(ctx, &sdkv1.HandleFilterRequest{Name: name, Event: se, PluginId: c.id})
-	if err != nil {
-		return true, &sdkv1.EventResult{}, err
-	}
-	return resp.Allow, normalizeResult(resp.Result, resp.Sent, false, false), nil
+	return c.svc.HandleFilter(ctx, name, event)
 }
 
-func (c *NativeClient) HandleHook(ctx context.Context, name string, se *sdkv1.SDKEvent, chain []sdk.Component) ([]sdk.Component, bool, *sdkv1.EventResult, error) {
-	return c.handleHook(ctx, name, se, chain, nil)
+func (c *NativeClient) HandleHook(ctx context.Context, name string, event *sdk.Event, chain []sdk.Component) (sdk.HandleHookResult, error) {
+	return c.handleHook(ctx, name, event, chain, nil)
 }
 
-func (c *NativeClient) HandleHookWithPayload(ctx context.Context, name string, se *sdkv1.SDKEvent, chain []sdk.Component, payload any) ([]sdk.Component, bool, *sdkv1.EventResult, error) {
-	return c.handleHook(ctx, name, se, chain, payload)
+func (c *NativeClient) HandleHookWithPayload(ctx context.Context, name string, event *sdk.Event, chain []sdk.Component, payload any) (sdk.HandleHookResult, error) {
+	return c.handleHook(ctx, name, event, chain, payload)
 }
 
-func (c *NativeClient) handleHook(ctx context.Context, name string, se *sdkv1.SDKEvent, chain []sdk.Component, payload any) ([]sdk.Component, bool, *sdkv1.EventResult, error) {
+func (c *NativeClient) handleHook(ctx context.Context, name string, event *sdk.Event, chain []sdk.Component, payload any) (sdk.HandleHookResult, error) {
 	defer c.enter()()
 	var payloadJSON []byte
 	if payload != nil {
 		var err error
 		if payloadJSON, err = json.Marshal(payload); err != nil {
-			return chain, false, &sdkv1.EventResult{}, err
+			return sdk.HandleHookResult{Chain: chain}, err
 		}
 	}
-	resp, err := c.svc.HandleHook(ctx, &sdkv1.HandleHookRequest{Name: name, Event: se, Chain: sdk.ComponentsToProto(chain), PayloadJson: payloadJSON, PluginId: c.id})
-	if err != nil {
-		return chain, false, &sdkv1.EventResult{}, err
-	}
-	if len(resp.Chain) > 0 {
-		chain = sdk.ProtoToComponents(resp.Chain)
-	}
-	res := normalizeResult(resp.Result, resp.Sent, resp.Stop, resp.Handled)
-	return chain, res.StopPropagation, res, nil
+	return c.svc.HandleHook(ctx, name, event, chain, payloadJSON)
 }
 
-func (c *NativeClient) HandleLLMRequest(ctx context.Context, name string, se *sdkv1.SDKEvent, systemPrompt, userPrompt string) (string, string, bool, *sdkv1.EventResult, error) {
+func (c *NativeClient) HandleLLMRequest(ctx context.Context, name string, event *sdk.Event, systemPrompt, userPrompt string) (sdk.HandleLLMRequestResult, error) {
 	defer c.enter()()
-	resp, err := c.svc.HandleLLMRequest(ctx, &sdkv1.HandleLLMRequestRequest{Name: name, Event: se, SystemPrompt: systemPrompt, UserPrompt: userPrompt, PluginId: c.id})
-	if err != nil {
-		return systemPrompt, userPrompt, false, &sdkv1.EventResult{}, err
-	}
-	result := normalizeResult(resp.Result, resp.Sent, resp.Stop, false)
-	return resp.SystemPrompt, resp.UserPrompt, result.StopPropagation, result, nil
+	return c.svc.HandleLLMRequest(ctx, name, event, systemPrompt, userPrompt)
 }
 
-func (c *NativeClient) ListWebApis(ctx context.Context, ref *sdkv1.PluginRef) ([]*sdkv1.WebApiDesc, error) {
+func (c *NativeClient) ListWebApis(ctx context.Context) ([]sdk.WebAPIDesc, error) {
 	defer c.enter()()
-	if ref == nil {
-		ref = &sdkv1.PluginRef{PluginId: c.id}
-	}
-	resp, err := c.svc.ListWebApis(ctx, ref)
-	if err != nil {
-		return nil, err
-	}
-	return resp.GetWebApis(), nil
+	return c.svc.ListWebApis(ctx)
 }
 
-func (c *NativeClient) ListTools(ctx context.Context, ref *sdkv1.PluginRef) ([]*sdkv1.ToolDesc, error) {
+func (c *NativeClient) ListTools(ctx context.Context) ([]sdk.ToolDesc, error) {
 	defer c.enter()()
-	if ref == nil {
-		ref = &sdkv1.PluginRef{PluginId: c.id}
-	}
-	resp, err := c.svc.ListTools(ctx, ref)
-	if err != nil {
-		return nil, err
-	}
-	return resp.GetTools(), nil
+	return c.svc.ListTools(ctx)
 }
 
-func (c *NativeClient) GetConfigSchema(ctx context.Context, ref *sdkv1.PluginRef) ([]byte, error) {
+func (c *NativeClient) GetConfigSchema(ctx context.Context) ([]byte, error) {
 	defer c.enter()()
-	if ref == nil {
-		ref = &sdkv1.PluginRef{PluginId: c.id}
-	}
-	resp, err := c.svc.GetConfigSchema(ctx, ref)
-	if err != nil {
-		return nil, err
-	}
-	return resp.GetSchemaJson(), nil
+	return c.svc.GetConfigSchema(ctx)
 }
 
-func (c *NativeClient) HandleTool(ctx context.Context, name string, args map[string]any, se *sdkv1.SDKEvent) (string, bool, *sdkv1.EventResult, error) {
+func (c *NativeClient) HandleTool(ctx context.Context, name string, args map[string]any, event *sdk.Event) (sdk.HandleToolResult, error) {
 	defer c.enter()()
-	argsJSON, err := json.Marshal(args)
-	if err != nil {
-		return "", false, &sdkv1.EventResult{}, err
-	}
-	resp, err := c.svc.HandleTool(ctx, &sdkv1.HandleToolRequest{Name: name, ArgsJson: argsJSON, Event: se, PluginId: c.id})
-	if err != nil {
-		return "", false, &sdkv1.EventResult{}, err
-	}
-	return resp.Text, resp.IsError, normalizeResult(resp.Result, resp.Sent, false, false), nil
+	return c.svc.HandleTool(ctx, name, args, event)
 }
 
-func (c *NativeClient) HandleWebRequest(ctx context.Context, req *sdkv1.HandleWebRequestRequest) (*sdkv1.HandleWebRequestResponse, error) {
+func (c *NativeClient) HandleWebRequest(ctx context.Context, req sdk.HandleWebRequest) (sdk.HandleWebResponse, error) {
 	defer c.enter()()
-	if req != nil && req.PluginId == "" {
-		req.PluginId = c.id
+	if req.PluginID == "" {
+		req.PluginID = c.id
 	}
 	return c.svc.HandleWebRequest(ctx, req)
 }
 
-func (c *NativeClient) HealthCheck(ctx context.Context) (*sdkv1.HealthResponse, error) {
+func (c *NativeClient) HealthCheck(ctx context.Context) (sdk.HealthInfo, error) {
 	defer c.enter()()
-	return c.svc.HealthCheck(ctx, &sdkv1.Empty{})
+	return c.svc.HealthCheck(ctx)
 }
 
-func (c *NativeClient) Cleanup(ctx context.Context, ref *sdkv1.PluginRef) error {
+func (c *NativeClient) Cleanup(ctx context.Context) error {
 	defer c.enter()()
-	if ref == nil {
-		ref = &sdkv1.PluginRef{PluginId: c.id}
-	}
-	_, err := c.svc.Cleanup(ctx, ref)
-	return err
+	return c.svc.Cleanup(ctx)
 }
 
 func (c *NativeClient) SetLogLevel(ctx context.Context, level string) error {
 	defer c.enter()()
-	_, err := c.svc.SetLogLevel(ctx, &sdkv1.SetLogLevelRequest{Level: level, PluginId: c.id})
-	return err
+	return c.svc.SetLogLevel(ctx, level)
 }
 
-func (c *NativeClient) FeedSessionWait(ctx context.Context, se *sdkv1.SDKEvent) (bool, error) {
+func (c *NativeClient) FeedSessionWait(ctx context.Context, event *sdk.Event) (bool, error) {
 	defer c.enter()()
-	resp, err := c.svc.FeedSessionWait(ctx, &sdkv1.FeedSessionWaitRequest{Event: se, PluginId: c.id})
+	res, err := c.svc.FeedSessionWait(ctx, event)
 	if err != nil {
 		return false, err
 	}
-	return resp.GetHandled(), nil
+	return res.Handled, nil
 }
 
-func (c *NativeClient) ManagePlugin(ctx context.Context, req *sdkv1.ManagePluginRequest) (*sdkv1.ManagePluginResponse, error) {
-	defer c.enter()()
-	if req != nil && req.PluginId == "" {
-		req.PluginId = c.id
-	}
-	return c.svc.ManagePlugin(ctx, req)
+// ManagePlugin / FeedCronJob are python-shared runtime control calls; a Go
+// Native plugin does not implement them.
+func (c *NativeClient) ManagePlugin(context.Context, sdk.ManagePluginRequest) (sdk.ManagePluginResponse, error) {
+	return sdk.ManagePluginResponse{}, sdk.Errorf(sdk.CodeUnimplemented, "ManagePlugin is not implemented by the Go plugin SDK")
 }
 
-func (c *NativeClient) FeedCronJob(ctx context.Context, req *sdkv1.FeedCronJobRequest) (*sdkv1.FeedCronJobResponse, error) {
-	defer c.enter()()
-	if req != nil && req.PluginId == "" {
-		req.PluginId = c.id
-	}
-	return c.svc.FeedCronJob(ctx, req)
+func (c *NativeClient) FeedCronJob(context.Context, sdk.FeedCronJobRequest) (sdk.FeedCronJobResponse, error) {
+	return sdk.FeedCronJobResponse{}, sdk.Errorf(sdk.CodeUnimplemented, "FeedCronJob is not implemented by the Go plugin SDK")
 }
