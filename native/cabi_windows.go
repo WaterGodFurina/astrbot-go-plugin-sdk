@@ -52,7 +52,7 @@ func SetPlugin(p *sdk.Plugin) { nativeCABIPlugin = p }
 var nativeCABIPlugin *sdk.Plugin
 
 //export AstrBotPluginOpen
-func AstrBotPluginOpen(pluginID *C.char, handleOut **C.uintptr_t) C.int {
+func AstrBotPluginOpen(pluginID *C.char, handleOut *C.uintptr_t) C.int {
 	if handleOut == nil || nativeCABIPlugin == nil {
 		return 1
 	}
@@ -73,8 +73,10 @@ func AstrBotPluginOpen(pluginID *C.char, handleOut **C.uintptr_t) C.int {
 	handle := cabiNextID
 	cabiPlugins[handle] = cp
 	cabiPluginsMu.Unlock()
-	// handleOut 是宿主传入的 uintptr_t*：往它指向的位置写入句柄值。
-	**handleOut = C.uintptr_t(handle)
+	// handleOut 是宿主传入的 uintptr_t*（宿主 `&handle` 的地址）：往它指向的
+	// 位置写入句柄值。注意参数必须是单指针——宿主传的是 `&handle`，若声明成
+	// **uintptr_t 会把宿主 handle 的当前值当指针解引用 → nil deref panic。
+	*handleOut = C.uintptr_t(handle)
 	return 0
 }
 
