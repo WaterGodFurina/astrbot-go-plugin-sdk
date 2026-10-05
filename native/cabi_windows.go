@@ -73,7 +73,8 @@ func AstrBotPluginOpen(pluginID *C.char, handleOut **C.uintptr_t) C.int {
 	handle := cabiNextID
 	cabiPlugins[handle] = cp
 	cabiPluginsMu.Unlock()
-	*handleOut = C.uintptr_t(handle)
+	// handleOut 是宿主传入的 uintptr_t*：往它指向的位置写入句柄值。
+	**handleOut = C.uintptr_t(handle)
 	return 0
 }
 
