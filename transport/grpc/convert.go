@@ -335,3 +335,37 @@ func unmarshalMapE(b []byte) (map[string]any, error) {
 	}
 	return m, nil
 }
+
+// webUploadFilesToProto / webUploadFilesFromProto convert multipart file parts
+// between the native and wire representations.
+func webUploadFilesToProto(files []sdk.WebUploadFile) []*sdkv1.WebUploadFile {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]*sdkv1.WebUploadFile, 0, len(files))
+	for _, f := range files {
+		out = append(out, &sdkv1.WebUploadFile{
+			Field:       f.Field,
+			Filename:    f.Filename,
+			ContentType: f.ContentType,
+			Content:     f.Content,
+		})
+	}
+	return out
+}
+
+func webUploadFilesFromProto(files []*sdkv1.WebUploadFile) []sdk.WebUploadFile {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]sdk.WebUploadFile, 0, len(files))
+	for _, f := range files {
+		out = append(out, sdk.WebUploadFile{
+			Field:       f.GetField(),
+			Filename:    f.GetFilename(),
+			ContentType: f.GetContentType(),
+			Content:     f.GetContent(),
+		})
+	}
+	return out
+}

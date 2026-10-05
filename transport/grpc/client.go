@@ -318,6 +318,7 @@ func (c *Client) HandleWebRequest(ctx context.Context, req sdk.HandleWebRequest)
 		Query:    mapToWebKV(req.Query),
 		Headers:  mapToWebKV(req.Headers),
 		Body:     req.Body,
+		Files:    webUploadFilesToProto(req.Files),
 	}, rpcCallOpts...)
 	if err != nil {
 		return sdk.HandleWebResponse{}, err
@@ -335,7 +336,30 @@ func (c *Client) HealthCheck(ctx context.Context) (sdk.HealthInfo, error) {
 	if err != nil {
 		return sdk.HealthInfo{}, err
 	}
-	return sdk.HealthInfo{OK: resp.GetOk(), Version: resp.GetVersion()}, nil
+	return healthFromProto(resp), nil
+}
+
+// healthFromProto maps the wire HealthResponse (incl. runtime-reported plugin
+// status) to the native HealthInfo.
+func healthFromProto(resp *sdkv1.HealthResponse) sdk.HealthInfo {
+	out := sdk.HealthInfo{
+		OK:               resp.GetOk(),
+		Load:             resp.GetLoad(),
+		Version:          resp.GetVersion(),
+		RuntimeHeartbeat: resp.GetRuntimeHeartbeat(),
+	}
+	for _, ps := range resp.GetPlugins() {
+		out.Plugins = append(out.Plugins, sdk.PluginStatus{
+			PluginID:     ps.GetPluginId(),
+			PluginName:   ps.GetPluginName(),
+			State:        ps.GetState(),
+			Health:       ps.GetHealth(),
+			LastActivity: ps.GetLastActivity(),
+			Error:        ps.GetError(),
+			Generation:   ps.GetGeneration(),
+		})
+	}
+	return out
 }
 
 // Cleanup tells the plugin to run its unload hook.

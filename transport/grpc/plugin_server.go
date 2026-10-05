@@ -126,6 +126,7 @@ func (s *pluginServiceServer) HandleWebRequest(ctx context.Context, req *sdkv1.H
 		Query:    webKVToMap(req.GetQuery()),
 		Headers:  webKVToMap(req.GetHeaders()),
 		Body:     req.GetBody(),
+		Files:    webUploadFilesFromProto(req.GetFiles()),
 	})
 	if err != nil {
 		return nil, err
@@ -142,7 +143,24 @@ func (s *pluginServiceServer) HealthCheck(ctx context.Context, _ *sdkv1.Empty) (
 	if err != nil {
 		return nil, err
 	}
-	return &sdkv1.HealthResponse{Ok: info.OK, Version: info.Version}, nil
+	out := &sdkv1.HealthResponse{
+		Ok:               info.OK,
+		Load:             info.Load,
+		Version:          info.Version,
+		RuntimeHeartbeat: info.RuntimeHeartbeat,
+	}
+	for _, ps := range info.Plugins {
+		out.Plugins = append(out.Plugins, &sdkv1.PluginStatus{
+			PluginId:     ps.PluginID,
+			PluginName:   ps.PluginName,
+			State:        ps.State,
+			Health:       ps.Health,
+			LastActivity: ps.LastActivity,
+			Error:        ps.Error,
+			Generation:   ps.Generation,
+		})
+	}
+	return out, nil
 }
 
 func (s *pluginServiceServer) SetLogLevel(ctx context.Context, req *sdkv1.SetLogLevelRequest) (*sdkv1.Empty, error) {

@@ -74,10 +74,26 @@ type PluginInfo struct {
 	WebAPIs          []WebAPIDesc
 }
 
-// HealthInfo is the HealthCheck response.
+// HealthInfo is the HealthCheck response. Load/Plugins/RuntimeHeartbeat are
+// reported by runtimes that mirror plugin state (Python shared runtime); a Go
+// plugin leaves them zero.
 type HealthInfo struct {
-	OK      bool
-	Version string
+	OK               bool
+	Load             float64
+	Version          string
+	Plugins          []PluginStatus
+	RuntimeHeartbeat float64
+}
+
+// PluginStatus is a runtime-reported per-plugin status snapshot.
+type PluginStatus struct {
+	PluginID     string
+	PluginName   string
+	State        string
+	Health       string
+	LastActivity float64
+	Error        string
+	Generation   int64
 }
 
 // HandleCommandResult is the native result of dispatching a command.
@@ -114,9 +130,17 @@ type HandleToolResult struct {
 	Result  EventResult
 }
 
+// WebUploadFile is one multipart file part of a proxied WebAPI request.
+type WebUploadFile struct {
+	Field       string
+	Filename    string
+	ContentType string
+	Content     []byte
+}
+
 // HandleWebRequest is a dashboard-proxied HTTP request handed to a plugin
 // WebAPI. Query/Headers are multi-value maps; PathParams holds dynamic route
-// values; Body is the raw request body.
+// values; Body is the raw request body; Files carries multipart uploads.
 type HandleWebRequest struct {
 	PluginID   string
 	Method     string
@@ -124,6 +148,7 @@ type HandleWebRequest struct {
 	Query      map[string][]string
 	Headers    map[string][]string
 	Body       []byte
+	Files      []WebUploadFile
 	PathParams map[string]string
 }
 
