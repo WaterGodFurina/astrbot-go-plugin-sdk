@@ -73,7 +73,7 @@ func (s *grpcHostServiceServer) RecallMessage(ctx context.Context, req *sdkv1.Re
 }
 
 func (s *grpcHostServiceServer) GetConfig(ctx context.Context, req *sdkv1.GetConfigRequest) (*sdkv1.GetConfigResponse, error) {
-	cfg, err := s.host.GetConfig(ctx, req.GetPluginName())
+	cfg, err := s.host.GetConfig(ctx, req.GetPluginName(), req.GetPluginId())
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +81,7 @@ func (s *grpcHostServiceServer) GetConfig(ctx context.Context, req *sdkv1.GetCon
 }
 
 func (s *grpcHostServiceServer) SetConfig(ctx context.Context, req *sdkv1.SetConfigRequest) (*sdkv1.Empty, error) {
-	if err := s.host.SetConfig(ctx, req.GetPluginName(), unmarshalMap(req.GetConfigJson())); err != nil {
+	if err := s.host.SetConfig(ctx, req.GetPluginName(), req.GetPluginId(), unmarshalMap(req.GetConfigJson())); err != nil {
 		return nil, err
 	}
 	return &sdkv1.Empty{}, nil

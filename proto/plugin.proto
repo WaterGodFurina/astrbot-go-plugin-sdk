@@ -740,6 +740,10 @@ message RecallMessageRequest {
 message GetConfigRequest {
   // Plugin name (the value returned by Register).
   string plugin_name = 1;
+  // 多租户租户身份：python-shared 下由 current PluginSession 注入的 manifest
+  // plugin_id，宿主机以其为配置归属的唯一键（优先于 plugin_name）。单插件
+  // 进程 / 旧插件留空（回退 plugin_name，保持兼容）。
+  string plugin_id = 2;
 }
 
 message GetConfigResponse {
@@ -752,6 +756,8 @@ message SetConfigRequest {
   string plugin_name = 1;
   // JSON object of the full config to persist.
   bytes config_json = 2;
+  // 多租户租户身份：同 GetConfigRequest.plugin_id。单插件进程 / 旧插件留空。
+  string plugin_id = 3;
 }
 
 // 只追加字段保持前后向兼容：旧字段不改名/不改号/不删除。

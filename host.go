@@ -122,7 +122,8 @@ func (h *host) GetConfig(pluginName string) (map[string]any, error) {
 	}
 	ctx, cancel := hostRPCCtx()
 	defer cancel()
-	return svc.GetConfig(ctx, pluginName)
+	// Go 插件为单租户进程，无 plugin_id：传空，由宿主按连接身份/注册名解析。
+	return svc.GetConfig(ctx, pluginName, "")
 }
 
 // SetConfig persists the plugin's full config map
@@ -135,7 +136,8 @@ func (h *host) SetConfig(pluginName string, cfg map[string]any) error {
 	}
 	ctx, cancel := hostRPCCtx()
 	defer cancel()
-	return svc.SetConfig(ctx, pluginName, cfg)
+	// Go 插件为单租户进程，无 plugin_id：传空。
+	return svc.SetConfig(ctx, pluginName, "", cfg)
 }
 
 // ChatLLMFull calls the host's chat LLM provider with the full request
@@ -622,6 +624,13 @@ type HostServiceHooks struct {
 	GetConfig func(pluginName string) (map[string]any, error)
 	// SetConfig persists the plugin's full config map.
 	SetConfig func(pluginName string, cfg map[string]any) error
+	// GetConfigByID 是 GetConfig 的租户精确版本（python-shared 多租户）：
+	// 宿主按 manifest plugin_id 直接解析配置，不依赖注册名（同名插件不再
+	// 歧义）。非 nil 时 HostServiceServer 优先调用它；nil 时回退 GetConfig
+	//（单插件进程 / 旧宿主）。
+	GetConfigByID func(pluginID string) (map[string]any, error)
+	// SetConfigByID 是 SetConfig 的租户精确版本（同上）。
+	SetConfigByID func(pluginID string, cfg map[string]any) error
 	// ChatLLM calls the default chat provider with the full request. It
 	// receives the request pointer directly (zero-copy passthrough) so the
 	// host can consume audio_urls/tools_json/contexts_json/provider_id.
@@ -1103,33 +1112,76 @@ func (s *HostServiceServer) RecallMessage(_ context.Context, platform, messageID
 	return h.RecallMessage(platform, messageID)
 }
 
-func (s *HostServiceServer) GetConfig(_ context.Context, pluginName string) (map[string]any, error) {
-	// 身份隔离：插件只能读取自己名字的配置，禁止探测/读取其他插件配置
+// configTargetID 解析配置读写的目标租户 id，并做归属校验（fail-closed）。
+//
+//   - 共享 Runtime（多租户）：plugin_id 由插件侧 current PluginSession 注入，
+//     是唯一可靠的租户身份。优先用 plugin_id 直接定位；同时给出注册名时，
+//     若注册名解析出的 id 与 plugin_id 不一致则拒绝（防止 id/名错配）。
+//     **不再**以注册名作为路由依据（消除同名歧义与"按名探测他人配置"）。
+//   - 单插件连接：目标必须等于连接身份（严格），保持既有行为。
+func (s *HostServiceServer) configTargetID(pluginName, pluginID string) (string, error) {
+	if s.isSharedConn() {
+		id := pluginID
+		if pluginName != "" {
+			rid := s.authID(pluginName)
+			if rid != "" && id != "" && rid != id {
+				return "", Errorf(CodePermissionDenied, "plugin_id %q 与注册名 %q 解析结果 %q 不一致，已拒绝", id, pluginName, rid)
+			}
+			if id == "" {
+				id = rid // 旧 SDK 未带 plugin_id：回退按注册名解析（已知隔离损失）
+			}
+		}
+		if id == "" {
+			return "", Errorf(CodePermissionDenied, "共享 Runtime 缺少 plugin_id 且注册名 %q 无法唯一解析", pluginName)
+		}
+		return id, nil
+	}
+	// 单插件连接：目标名/id（若给出）必须与本连接身份一致。
+	if pluginID != "" && pluginID != s.connectionID() {
+		return "", Errorf(CodePermissionDenied, "插件 %q 无权访问插件 %q 的配置", s.identity(), pluginID)
+	}
+	if pluginName != "" && pluginName != s.identity() {
+		return "", Errorf(CodePermissionDenied, "插件 %q 无权访问插件 %q 的配置", s.identity(), pluginName)
+	}
+	return s.connectionID(), nil
+}
+
+func (s *HostServiceServer) GetConfig(_ context.Context, pluginName, pluginID string) (map[string]any, error) {
+	// 身份隔离：插件只能读取自己的配置，禁止探测/读取其他插件配置
 	//（插件自身以宿主用户运行、可直接读文件系统，此校验是纵深防御，
 	//  真正隔离需插件降权/容器化）。空身份一律拒绝（fail-closed）。
 	if err := s.requireIdentity(); err != nil {
 		return nil, err
 	}
-	if !s.ownsConfig(pluginName) {
-		return nil, Errorf(CodePermissionDenied, "插件 %q 无权读取插件 %q 的配置", s.identity(), pluginName)
+	targetID, err := s.configTargetID(pluginName, pluginID)
+	if err != nil {
+		return nil, err
 	}
 	h := getHostHooks()
+	// 多租户优先走按 id 精确解析；旧宿主未提供时回退按注册名。
+	if h.GetConfigByID != nil {
+		return h.GetConfigByID(targetID)
+	}
 	if h.GetConfig == nil {
 		return map[string]any{}, nil
 	}
 	return h.GetConfig(pluginName)
 }
 
-func (s *HostServiceServer) SetConfig(_ context.Context, pluginName string, cfg map[string]any) error {
-	// 身份隔离：插件只能写自己名字的配置，禁止篡改其他插件配置。空身份
+func (s *HostServiceServer) SetConfig(_ context.Context, pluginName, pluginID string, cfg map[string]any) error {
+	// 身份隔离：插件只能写自己的配置，禁止篡改其他插件配置。空身份
 	// 一律拒绝（fail-closed）。
 	if err := s.requireIdentity(); err != nil {
 		return err
 	}
-	if !s.ownsConfig(pluginName) {
-		return Errorf(CodePermissionDenied, "插件 %q 无权修改插件 %q 的配置", s.identity(), pluginName)
+	targetID, err := s.configTargetID(pluginName, pluginID)
+	if err != nil {
+		return err
 	}
 	h := getHostHooks()
+	if h.SetConfigByID != nil {
+		return h.SetConfigByID(targetID, cfg)
+	}
 	if h.SetConfig == nil {
 		return nil
 	}

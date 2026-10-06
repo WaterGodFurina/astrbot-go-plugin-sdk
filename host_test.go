@@ -11,19 +11,19 @@ import (
 func TestHostServiceIdentityIsolation(t *testing.T) {
 	srv := &HostServiceServer{pluginID: "test_plugin_a"}
 
-	// 跨插件读取被拒
-	_, err := srv.GetConfig(context.Background(), "test_plugin_b")
+	// 跨插件读取被拒（单插件连接：无 plugin_id，按注册名校验）
+	_, err := srv.GetConfig(context.Background(), "test_plugin_b", "")
 	if CodeOf(err) != CodePermissionDenied {
 		t.Fatalf("cross-plugin GetConfig: want PermissionDenied, got %v", err)
 	}
 
 	// 自己名字放行（hooks 未设置 → 返回空配置而非错误）
-	if _, err = srv.GetConfig(context.Background(), "test_plugin_a"); err != nil {
+	if _, err = srv.GetConfig(context.Background(), "test_plugin_a", ""); err != nil {
 		t.Fatalf("self GetConfig should pass, got %v", err)
 	}
 
 	// 跨插件写入被拒
-	err = srv.SetConfig(context.Background(), "test_plugin_b", nil)
+	err = srv.SetConfig(context.Background(), "test_plugin_b", "", nil)
 	if CodeOf(err) != CodePermissionDenied {
 		t.Fatalf("cross-plugin SetConfig: want PermissionDenied, got %v", err)
 	}
@@ -52,11 +52,11 @@ func TestBindHostServiceName(t *testing.T) {
 	BindHostServiceName("astrbot_plugin_jm_cosmos", "jm_cosmos")
 
 	// 插件用注册名 jm_cosmos 访问自己 → 放行
-	if _, err := server.GetConfig(context.Background(), "jm_cosmos"); err != nil {
+	if _, err := server.GetConfig(context.Background(), "jm_cosmos", ""); err != nil {
 		t.Fatalf("self access with registered name should pass, got %v", err)
 	}
 	// 其他插件名仍被拒
-	_, err := server.GetConfig(context.Background(), "other")
+	_, err := server.GetConfig(context.Background(), "other", "")
 	if CodeOf(err) != CodePermissionDenied {
 		t.Fatalf("cross-plugin after bind: want PermissionDenied, got %v", err)
 	}
@@ -64,6 +64,81 @@ func TestBindHostServiceName(t *testing.T) {
 	hostServersMu.Lock()
 	delete(hostServers, "astrbot_plugin_jm_cosmos")
 	hostServersMu.Unlock()
+}
+
+// TestSharedConnConfigRoutesByPluginID 验证 python-shared 多租户下配置读写
+// 按 manifest plugin_id 严格路由（GetConfigByID/SetConfigByID 收到精确 id）：
+//   - A 的读写落到 id_a，B 落到 id_b，互不串；
+//   - plugin_id 与注册名解析结果不一致 → 拒绝，且不触达宿主 hook；
+//   - 注册名同名歧义（resolver 返回 ""）时，plugin_id 仍精确路由。
+func TestSharedConnConfigRoutesByPluginID(t *testing.T) {
+	var gotID string
+	SetHostHooks(HostServiceHooks{
+		GetConfigByID: func(pluginID string) (map[string]any, error) {
+			gotID = pluginID
+			return map[string]any{"owner": pluginID}, nil
+		},
+		SetConfigByID: func(pluginID string, _ map[string]any) error {
+			gotID = pluginID
+			return nil
+		},
+	})
+	defer SetHostHooks(HostServiceHooks{})
+
+	SetSharedPluginResolver(func(name string) string {
+		switch name {
+		case "A":
+			return "id_a"
+		case "B":
+			return "id_b"
+		default:
+			return "" // 同名歧义 / 未知 → fail-closed
+		}
+	})
+	defer SetSharedPluginResolver(nil)
+
+	srv := &HostServiceServer{connKey: SharedRuntimeConnKey, pluginID: SharedRuntimeConnKey}
+
+	// A 读自己的配置 → 精确 id_a
+	if _, err := srv.GetConfig(context.Background(), "A", "id_a"); err != nil {
+		t.Fatalf("A get own config: %v", err)
+	}
+	if gotID != "id_a" {
+		t.Fatalf("A get routed to %q, want id_a", gotID)
+	}
+	// A 写自己的配置 → id_a
+	if err := srv.SetConfig(context.Background(), "A", "id_a", map[string]any{"x": 1}); err != nil {
+		t.Fatalf("A set own config: %v", err)
+	}
+	if gotID != "id_a" {
+		t.Fatalf("A set routed to %q, want id_a", gotID)
+	}
+	// B → id_b（与 A 隔离）
+	if _, err := srv.GetConfig(context.Background(), "B", "id_b"); err != nil {
+		t.Fatalf("B get own config: %v", err)
+	}
+	if gotID != "id_b" {
+		t.Fatalf("B get routed to %q, want id_b", gotID)
+	}
+
+	// A 用 A 的注册名 + B 的 plugin_id → 解析不一致 → 拒绝，不触达 hook。
+	gotID = ""
+	_, err := srv.GetConfig(context.Background(), "A", "id_b")
+	if CodeOf(err) != CodePermissionDenied {
+		t.Fatalf("mismatched id/name: want PermissionDenied, got %v", err)
+	}
+	if gotID != "" {
+		t.Fatalf("mismatched request must not reach hook, got %q", gotID)
+	}
+
+	// 注册名同名歧义（resolver 返回 ""）：plugin_id 仍精确路由。
+	SetSharedPluginResolver(func(string) string { return "" })
+	if _, err := srv.GetConfig(context.Background(), "dup_name", "id_a"); err != nil {
+		t.Fatalf("ambiguous name with plugin_id should still route: %v", err)
+	}
+	if gotID != "id_a" {
+		t.Fatalf("ambiguous-name request routed to %q, want id_a", gotID)
+	}
 }
 
 // TestRegisterBridgeHookAnonymousRejected 验证匿名（无绑定身份）插件注册

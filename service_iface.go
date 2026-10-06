@@ -56,8 +56,8 @@ type HostService interface {
 	CallAction(ctx context.Context, platform, api string, params map[string]any) (map[string]any, error)
 	SendMessage(ctx context.Context, platform, sessionID string, chain []Component) error
 	RecallMessage(ctx context.Context, platform, messageID string) error
-	GetConfig(ctx context.Context, pluginName string) (map[string]any, error)
-	SetConfig(ctx context.Context, pluginName string, cfg map[string]any) error
+	GetConfig(ctx context.Context, pluginName, pluginID string) (map[string]any, error)
+	SetConfig(ctx context.Context, pluginName, pluginID string, cfg map[string]any) error
 	ChatLLM(ctx context.Context, req *ChatLLMRequest) (string, error)
 	React(ctx context.Context, platform, sessionID, messageID, emoji string) error
 	TextToImage(ctx context.Context, text, templateName string) (string, error)

@@ -40,16 +40,16 @@ func (a grpcHostCaller) RecallMessage(ctx context.Context, platform, messageID s
 	return err
 }
 
-func (a grpcHostCaller) GetConfig(ctx context.Context, pluginName string) (map[string]any, error) {
-	resp, err := a.c.GetConfig(ctx, &sdkv1.GetConfigRequest{PluginName: pluginName}, a.opts...)
+func (a grpcHostCaller) GetConfig(ctx context.Context, pluginName, pluginID string) (map[string]any, error) {
+	resp, err := a.c.GetConfig(ctx, &sdkv1.GetConfigRequest{PluginName: pluginName, PluginId: pluginID}, a.opts...)
 	if err != nil {
 		return nil, err
 	}
 	return unmarshalMap(resp.GetConfigJson()), nil
 }
 
-func (a grpcHostCaller) SetConfig(ctx context.Context, pluginName string, cfg map[string]any) error {
-	_, err := a.c.SetConfig(ctx, &sdkv1.SetConfigRequest{PluginName: pluginName, ConfigJson: marshalJSON(cfg)}, a.opts...)
+func (a grpcHostCaller) SetConfig(ctx context.Context, pluginName, pluginID string, cfg map[string]any) error {
+	_, err := a.c.SetConfig(ctx, &sdkv1.SetConfigRequest{PluginName: pluginName, PluginId: pluginID, ConfigJson: marshalJSON(cfg)}, a.opts...)
 	return err
 }
 
